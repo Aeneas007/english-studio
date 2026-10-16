@@ -886,11 +886,11 @@ p {
 .audio-dock > small span {
   margin-left: 8px;
 }
-.immersive .button.soft {
+.reader-shell .button.soft {
   background: #d9d6c750;
   color: var(--reader-color);
 }
-.immersive .button.dark {
+.reader-shell .button.dark {
   background: var(--reader-color);
   color: var(--reader-bg);
 }
@@ -984,6 +984,22 @@ dialog::backdrop {
 .context-box small {
   font-size: 9px;
   color: #969e8c;
+}
+.word-sheet .context-box p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.word-sheet .context-box.expanded p {
+  display: block;
+}
+.context-toggle {
+  background: transparent;
+  color: #718461;
+  padding: 10px 0 0;
+  font-size: 11px;
+  text-decoration: underline;
 }
 .lookup-actions {
   display: flex;

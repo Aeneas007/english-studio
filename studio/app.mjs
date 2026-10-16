@@ -459,7 +459,7 @@ async function termSheet(
     existing = state.terms.find((t) => t.w === normalize(term));
   const token = sheet(
     esc(term),
-    `<div id="term-result"><p class="subtle">正在查词…</p></div><div class="context-box"><span>原文语境</span><p>${esc(context)}</p></div><div class="lookup-actions"><button class="button soft" data-pronounce="${esc(term)}">▶ 发音</button><button class="button soft" data-action="edit-meaning">编辑词义</button></div><label class="meaning-editor hidden" id="meaning-editor">我的释义<textarea id="term-meaning" rows="3">${esc(existing?.meaning || "")}</textarea></label><button class="button primary wide" data-save-term="${esc(normalize(term))}" data-index="${index}">${existing ? "更新单词卡" : "＋ 加入单词本"}</button><button class="button soft wide" data-online-term="${esc(term)}">${phrase ? "在线翻译短语" : "查询在线翻译"}</button><p class="micro">词典：ECDICT · 原文与收藏保存在当前浏览器</p>`,
+    `<div id="term-result"><p class="subtle">正在查词…</p></div><div class="context-box"><span>原文语境</span><p>${esc(context)}</p>${context.length > 180 ? '<button class="context-toggle" data-action="expand-context">展开原文</button>' : ""}</div><div class="lookup-actions"><button class="button soft" data-pronounce="${esc(term)}">▶ 发音</button><button class="button soft" data-action="edit-meaning">编辑词义</button></div><label class="meaning-editor hidden" id="meaning-editor">我的释义<textarea id="term-meaning" rows="3">${esc(existing?.meaning || "")}</textarea></label><button class="button primary wide" data-save-term="${esc(normalize(term))}" data-index="${index}">${existing ? "更新单词卡" : "＋ 加入单词本"}</button><button class="button soft wide" data-online-term="${esc(term)}">${phrase ? "在线翻译短语" : "查询在线翻译"}</button><p class="micro">词典：ECDICT · 原文与收藏保存在当前浏览器</p>`,
     "word-sheet",
   );
   let result;
@@ -1106,6 +1106,13 @@ document.addEventListener("click", async (e) => {
     return;
   }
   switch (action) {
+    case "expand-context": {
+      const expanded = node
+        .closest(".context-box")
+        .classList.toggle("expanded");
+      node.textContent = expanded ? "收起原文" : "展开原文";
+      break;
+    }
     case "close":
       closeSheet();
       break;
