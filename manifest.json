@@ -1,1 +1,19 @@
-{"name":"English Studio 英语学习","short_name":"English Studio","start_url":"./","display":"standalone","background_color":"#faf9f6","theme_color":"#ff653b","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{
+  "name": "English Studio · 在故事里学英语",
+  "short_name": "English Studio",
+  "id": "./",
+  "start_url": "./#books",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f5f1",
+  "theme_color": "#f6f5f1",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
