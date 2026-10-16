@@ -1,10 +1,10 @@
-const SHELL = "english-studio-shell-v4.0",
+const SHELL = "english-studio-shell-v4.0.1",
   DATA = "english-studio-data";
 const FILES = [
   "./",
   "./index.html",
-  "./studio/ui.css",
-  "./studio/app.mjs",
+  "./studio/ui.css?v=4.0.1",
+  "./studio/app.mjs?v=4.0.1",
   "./studio/core.mjs",
   "./studio/lexicon.mjs",
   "./studio/speech.mjs",
@@ -21,7 +21,7 @@ self.addEventListener("install", (event) =>
   event.waitUntil(
     caches
       .open(SHELL)
-      .then((cache) => cache.addAll(FILES))
+      .then((cache) => cache.addAll(FILES.map((path) => new Request(new URL(path, self.location.href), { cache: "reload" }))))
       .then(() => self.skipWaiting()),
   ),
 );
@@ -57,7 +57,7 @@ self.addEventListener("fetch", (event) => {
         if (saved) return saved;
       }
       try {
-        const response = await fetch(request);
+        const response = await fetch(request, isData ? {} : { cache: "no-cache" });
         if (response.ok) await cache.put(request, response.clone());
         return response;
       } catch {
