@@ -1,10 +1,10 @@
-const SHELL = "english-studio-shell-v4.0.1",
+const SHELL = "english-studio-shell-v4.0.2",
   DATA = "english-studio-data";
 const FILES = [
   "./",
   "./index.html",
-  "./studio/ui.css?v=4.0.1",
-  "./studio/app.mjs?v=4.0.1",
+  "./studio/ui.css?v=4.0.2",
+  "./studio/app.mjs?v=4.0.2",
   "./studio/core.mjs",
   "./studio/lexicon.mjs",
   "./studio/speech.mjs",
