@@ -1,0 +1,2 @@
+# Preserve downloaded source bytes for reproducible SHA-256 verification.
+content/sources/*.txt -text
