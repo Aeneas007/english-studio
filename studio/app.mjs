@@ -20,6 +20,10 @@ import { ReadingPractice } from "./reading-practice.mjs";
 import { textbookBooks, textbookUnits } from "./textbook-data.mjs";
 import { renderTextbookHub, renderTextbookVolume, renderTextbookUnit } from "./textbook-ui.mjs";
 import { TextbookPractice } from "./textbook-practice.mjs";
+import { tradeBooks, tradeTracks, tradeUnits } from "./trade-data.mjs";
+import { renderTradeHub, renderTradeTrack, renderTradeUnit } from "./trade-ui.mjs";
+
+const learningUnits = [...textbookUnits, ...tradeUnits];
 
 const $ = (s) => document.querySelector(s),
   root = $("#studio"),
@@ -78,7 +82,10 @@ const loaded = new Map(),
   cachedBooks = new Set(),
   cacheNames = new Set(),
   today = () => new Date().toLocaleDateString("en-CA");
-const catalog = () => [...window.READING_BOOKS, ...textbookBooks, ...state.imports];
+const catalog = () => [...window.READING_BOOKS, ...textbookBooks, ...tradeBooks, ...state.imports];
+function learningBook(unit) {
+  return unit?.track ? tradeBooks.find((item) => item.id === unit.bookId) : textbookBooks.find((item) => item.course === unit?.book);
+}
 const record = (id) =>
   state.records[id] ||
   (state.records[id] = {
@@ -212,6 +219,7 @@ function library() {
     return (
       ((category === "all" && b.collection !== "bible") ||
         (category === "classics" && b.collection === "classics") ||
+        (category === "trades" && b.collection === "trades") ||
         (category === "shorts" && (["classic-aesop", "classic-happy-prince", "classic-christmas-carol"].includes(b.id) || (!b.collection && !b.imported))) ||
         (category === "bible" && b.collection === "bible") ||
         (category === "favorites" && r.favorite) ||
@@ -241,6 +249,7 @@ function library() {
       ["all", "发现"],
       ["classics", "经典原著"],
       ["shorts", "短篇与寓言"],
+      ["trades", "职业英语"],
       ["favorites", "我的收藏"],
       ["continue", "继续阅读"],
       ["imports", "本地书籍"],
@@ -332,8 +341,8 @@ function readerHeading() {
   return {
     title: hierarchy.at(-1),
     context: hierarchy.length > 1 ? hierarchy.slice(0, -1).join(" / ") : "",
-    label: book.collection === "textbook" ? `第 ${ch + 1} 单元` : book.collection === "classics" && book.sourceFile ? chapter.zh : `第 ${ch + 1} 章`,
-    eyebrow: book.collection === "bible" ? "KING JAMES VERSION" : book.collection === "textbook" ? "ORIGINAL COMPANION" : "ENGLISH READING",
+    label: book.collection === "trades" ? `场景 ${ch + 1}` : book.collection === "textbook" ? `第 ${ch + 1} 单元` : book.collection === "classics" && book.sourceFile ? chapter.zh : `第 ${ch + 1} 章`,
+    eyebrow: book.collection === "trades" ? "AUSTRALIAN WORKPLACE ENGLISH" : book.collection === "bible" ? "KING JAMES VERSION" : book.collection === "textbook" ? "ORIGINAL COMPANION" : "ENGLISH READING",
   };
 }
 function buildParts() {
@@ -392,10 +401,14 @@ function renderReader() {
   document.body.dataset.theme = state.settings.theme;
   const pending = readingPending();
   const heading = readerHeading();
-  root.innerHTML = `<div class="reader-shell ${listening ? "listening" : ""}"><header class="reading-top"><button class="round" data-action="back-books" aria-label="${book.course ? "返回本册课程" : "返回书架"}">‹</button><div class="reader-title"><strong>${esc(book.title)}</strong><small>${esc(heading.title)}</small></div><div class="reader-tools"><button class="round" data-action="listen-mode" aria-label="${listening ? "退出听读" : "开启听读"}" aria-pressed="${listening}">${listening ? "■" : "♫"}</button><button class="reading-study-button ${pending.length >= 5 ? "ready" : ""}" data-action="reading-practice" aria-label="本书 ${pending.length} 个待练习词"><span>◇</span><span class="reader-count">${pending.length}</span></button><button class="round" data-action="contents" aria-label="章节目录">☷</button><button class="round" data-action="reader-settings" aria-label="阅读设置">Aa</button></div></header><div class="reading-position"><input class="reader-seek" id="reader-seek" type="range" min="0" max="${parts.length - 1}" value="${part}" aria-label="本章阅读页码"><span class="reader-page-label">${esc(heading.label)} · ${part + 1}/${parts.length}</span></div><main class="reader-paper" style="--font:${state.settings.size}px;--leading:${state.settings.line}">${part === 0 ? `<div class="reader-chapter-head"><p class="eyebrow">${esc(heading.eyebrow)}</p><h1>${esc(heading.title)}</h1>${heading.context ? `<p class="reader-chapter-context">${esc(heading.context)}</p>` : ""}</div>` : ""}<div class="reader-mode-strip"><button data-action="phrase-mode" class="${phraseMode ? "selected" : ""}">${phraseMode ? "请依次点选短语首词、末词" : "选短语"}</button><button data-action="translation-toggle">${state.settings.translations ? "隐藏译文" : "双语阅读"}</button><button data-action="marks">书签 / 笔记</button>${textbookReaderTools()}</div><div id="reading-text">${sentenceHTML()}</div></main><footer class="reader-footer"><button data-action="prev-page" ${ch === 0 && part === 0 ? "disabled" : ""}>‹ 上一页</button><span>${part + 1} / ${parts.length}<small> · ${Math.min(100, record(book.id).percent || 0)}%</small></span><button data-action="next-page">${ch === book.chapters.length - 1 && part === parts.length - 1 ? "读完 ✓" : "下一页 ›"}</button></footer><section class="audio-dock" aria-label="听读控制"><div class="audio-progress"><span id="audio-caption">${esc(book.chapters[ch].title)}</span><button data-action="sleep">${sleepUntil ? "定时关闭中" : "睡眠定时"}</button></div><div class="audio-controls"><button class="round" data-action="audio-prev" aria-label="上一句">│‹</button><button class="play-button" id="reader-play" data-action="play" aria-label="${speaker.mode === "playing" ? "暂停朗读" : "开始朗读"}">${speaker.mode === "playing" ? "Ⅱ" : "▶"}</button><button class="round" data-action="audio-next" aria-label="下一句">›│</button><button class="audio-small" data-action="reader-settings">${state.settings.rate}×</button><button class="audio-small" data-action="stop-audio">停止</button></div><small>设备语音 · <span id="offline-label">${navigator.onLine ? "已联网" : "离线模式"}</span></small></section></div>`;
+  root.innerHTML = `<div class="reader-shell ${listening ? "listening" : ""}"><header class="reading-top"><button class="round" data-action="back-books" aria-label="${book.track ? "返回工种课程" : book.course ? "返回本册课程" : "返回书架"}">‹</button><div class="reader-title"><strong>${esc(book.title)}</strong><small>${esc(heading.title)}</small></div><div class="reader-tools"><button class="round" data-action="listen-mode" aria-label="${listening ? "退出听读" : "开启听读"}" aria-pressed="${listening}">${listening ? "■" : "♫"}</button><button class="reading-study-button ${pending.length >= 5 ? "ready" : ""}" data-action="reading-practice" aria-label="本书 ${pending.length} 个待练习词"><span>◇</span><span class="reader-count">${pending.length}</span></button><button class="round" data-action="contents" aria-label="章节目录">☷</button><button class="round" data-action="reader-settings" aria-label="阅读设置">Aa</button></div></header><div class="reading-position"><input class="reader-seek" id="reader-seek" type="range" min="0" max="${parts.length - 1}" value="${part}" aria-label="本章阅读页码"><span class="reader-page-label">${esc(heading.label)} · ${part + 1}/${parts.length}</span></div><main class="reader-paper" style="--font:${state.settings.size}px;--leading:${state.settings.line}">${part === 0 ? `<div class="reader-chapter-head"><p class="eyebrow">${esc(heading.eyebrow)}</p><h1>${esc(heading.title)}</h1>${heading.context ? `<p class="reader-chapter-context">${esc(heading.context)}</p>` : ""}</div>` : ""}<div class="reader-mode-strip"><button data-action="phrase-mode" class="${phraseMode ? "selected" : ""}">${phraseMode ? "请依次点选短语首词、末词" : "选短语"}</button><button data-action="translation-toggle">${state.settings.translations ? "隐藏译文" : "双语阅读"}</button><button data-action="marks">书签 / 笔记</button>${textbookReaderTools()}</div><div id="reading-text">${sentenceHTML()}</div></main><footer class="reader-footer"><button data-action="prev-page" ${ch === 0 && part === 0 ? "disabled" : ""}>‹ 上一页</button><span>${part + 1} / ${parts.length}<small> · ${Math.min(100, record(book.id).percent || 0)}%</small></span><button data-action="next-page">${ch === book.chapters.length - 1 && part === parts.length - 1 ? "读完 ✓" : "下一页 ›"}</button></footer><section class="audio-dock" aria-label="听读控制"><div class="audio-progress"><span id="audio-caption">${esc(book.chapters[ch].title)}</span><button data-action="sleep">${sleepUntil ? "定时关闭中" : "睡眠定时"}</button></div><div class="audio-controls"><button class="round" data-action="audio-prev" aria-label="上一句">│‹</button><button class="play-button" id="reader-play" data-action="play" aria-label="${speaker.mode === "playing" ? "暂停朗读" : "开始朗读"}">${speaker.mode === "playing" ? "Ⅱ" : "▶"}</button><button class="round" data-action="audio-next" aria-label="下一句">›│</button><button class="audio-small" data-action="reader-settings">${state.settings.rate}×</button><button class="audio-small" data-action="stop-audio">停止</button></div><small>设备语音 · <span id="offline-label">${navigator.onLine ? "已联网" : "离线模式"}</span></small></section></div>`;
   document.documentElement.scrollTop = 0;
 }
 function textbookReaderTools() {
+  if (book?.collection === "trades") {
+    const unit = tradeUnits.find((item) => item.track === book.track && item.chapter === ch);
+    if (unit) return `<button data-trade-unit="${esc(unit.id)}">本课表达 / 练习</button>`;
+  }
   if (book?.collection === "textbook") {
     const unit = textbookUnits.find((item) => item.book === book.course && item.chapter === ch);
     if (unit) return `<button data-textbook-unit="${esc(unit.id)}">本课讲解 / 练习</button>`;
@@ -902,13 +915,38 @@ function textbookUnitPage(id) {
   const textbook = textbookBooks.find((item) => item.course === unit.book);
   shell(renderTextbookUnit({ book: textbook, unit, done: state.completedLessons?.includes(id) || false, draft: record(textbook.id).drafts?.[id] || "" }), "courses");
 }
+function tradesPage(trackId) {
+  const track = tradeTracks.find((item) => item.id === trackId);
+  const completed = state.completedLessons || [];
+  shell(track ? renderTradeTrack({ track, units: tradeUnits.filter((unit) => unit.track === track.id), completed }) : renderTradeHub({ tracks: tradeTracks, units: tradeUnits, completed }), "courses");
+}
+function tradeUnitPage(id) {
+  const unit = tradeUnits.find((item) => item.id === id);
+  if (!unit) return tradesPage();
+  shell(renderTradeUnit({ track: tradeTracks.find((item) => item.id === unit.track), unit, done: state.completedLessons?.includes(id) || false, draft: record(unit.bookId).drafts?.[id] || "" }), "courses");
+}
+function saveTradeTerm(term) {
+  const unit = tradeUnits.find((item) => route === "trade/" + item.id);
+  const entry = unit?.glossary.find((item) => item.term === term);
+  if (!entry) return;
+  const w = normalize(entry.term);
+  if (state.terms.some((item) => item.w === w)) return toast("这个表达已经在你的单词本中");
+  const index = Math.max(0, unit.items.findIndex((item) => item[0].toLowerCase().includes(entry.term.toLowerCase())));
+  const track = tradeTracks.find((item) => item.id === unit.track);
+  state.terms.push({ w, meaning: entry.meaning, example: unit.items[index][0], source: track.title + " · " + unit.title,
+    book: unit.bookId, chapter: unit.chapter, sentence: index,
+    offset: Math.max(0, unit.items[index][0].toLowerCase().indexOf(entry.term.toLowerCase())),
+    status: "learning", due: Date.now(), interval: 0, repetitions: 0, added: Date.now() });
+  day().words++;
+  if (save()) toast("已加入单词本 ✓");
+}
 const textbookPractice = new TextbookPractice({
   render: (html) => shell(html, "courses"),
   onSpeak: (text) => {
     try { speaker.preview(text, state.settings); }
     catch { toast("当前设备不支持朗读，请使用支持英语语音的浏览器"); }
   },
-  onExit: (unit) => nav("textbook/" + unit.id),
+  onExit: (unit) => nav((unit.track ? "trade/" : "textbook/") + unit.id),
   onComplete: (unit) => {
     state.completedLessons ||= [];
     if (!state.completedLessons.includes(unit.id)) {
@@ -996,9 +1034,17 @@ function checkReview(answer) {
     .querySelectorAll("[data-review-answer]")
     .forEach((b) => (b.disabled = true));
 }
+function tradeCoursePreview() {
+  const completed = new Set(state.completedLessons || []);
+  return `<div class="textbook-callout"><div><b>澳洲工地英语 · 4 个工种，24 个场景</b><p>HVAC、电工、水工和建筑：听懂任务、确认信息，把日常现场沟通说清楚。</p></div><button class="button dark" data-action="trades">进入工地英语 →</button></div><div class="course-grid">${tradeTracks.map((track) => {
+    const units = tradeUnits.filter((unit) => unit.track === track.id);
+    const count = units.filter((unit) => completed.has(unit.id)).length;
+    return `<button class="course-card" data-trade-track="${esc(track.id)}"><div style="background:${track.color}22"><small>AUSTRALIAN WORKPLACE · ${esc(track.level)}</small><b>${esc(track.englishTitle)}</b><span>${esc(track.symbol)}</span></div><section><h3>${esc(track.title)}</h3><p>${esc(track.description)}</p><small>${units.length} 个场景 · ${count} 已完成 · 对话 / 术语 / 听力</small></section></button>`;
+  }).join("")}</div><div class="catalog-caption"><h3>日常生活与系统学习</h3></div>`;
+}
 function coursesPage() {
   shell(
-    `<div class="page-heading"><div><p class="eyebrow">SMALL LESSONS, REAL CONVERSATIONS</p><h1>把英语用在生活里。</h1><p class="subtle">原创情境短课 · 听、理解、拼句，走完一个完整练习。</p></div></div><div class="textbook-callout"><div><b>新概念英语 1–4</b><p>四册 32 个原创配套单元：双语阅读、语法讲解、听力理解与练习。也可导入自己的 TXT / EPUB 教材。</p></div><button class="button dark" data-action="nce">打开教材 →</button></div><div class="course-grid">${lessons.map((l, i) => `<button class="course-card" data-lesson="${l.id}"><div style="background:${l.color}"><small>${l.level} · UNIT 0${i + 1}</small><b>${["Hello!", "Coffee?", "Let’s go.", "Good idea."][i]}</b><span>${["✺", "◒", "↗", "✦"][i]}</span></div><section><h3>${l.name}</h3><p>${l.subtitle}</p><small>6 句表达 · 听力 / 理解 / 拼句${state.completedLessons?.includes(l.id) ? " · 已完成 ✓" : ""}</small></section></button>`).join("")}</div><p class="page-footnote">这些是原创情境练习。未来计划增加更多学习主题、听力内容与字幕练习。</p>`,
+    `<div class="page-heading"><div><p class="eyebrow">SMALL LESSONS, REAL CONVERSATIONS</p><h1>把英语用在生活里。</h1><p class="subtle">澳洲工地英语、日常表达和系统学习：听、理解，再试着自己说。</p></div></div>${tradeCoursePreview()}<div class="textbook-callout"><div><b>新概念英语 1–4</b><p>四册 32 个原创配套单元：双语阅读、语法讲解、听力理解与练习。也可导入自己的 TXT / EPUB 教材。</p></div><button class="button dark" data-action="nce">打开教材 →</button></div><div class="course-grid">${lessons.map((l, i) => `<button class="course-card" data-lesson="${l.id}"><div style="background:${l.color}"><small>${l.level} · UNIT 0${i + 1}</small><b>${["Hello!", "Coffee?", "Let’s go.", "Good idea."][i]}</b><span>${["✺", "◒", "↗", "✦"][i]}</span></div><section><h3>${l.name}</h3><p>${l.subtitle}</p><small>6 句表达 · 听力 / 理解 / 拼句${state.completedLessons?.includes(l.id) ? " · 已完成 ✓" : ""}</small></section></button>`).join("")}</div><p class="page-footnote">这些是原创情境练习。未来计划增加更多学习主题、听力内容与字幕练习。</p>`,
     "courses",
   );
 }
@@ -1070,14 +1116,14 @@ function profile() {
       },
     ).join(
       "",
-    )}</div><section class="profile-panel"><h2>本地数据与备份</h2><p class="subtle">学习记录保存在这个浏览器中。清理浏览器数据或更换手机不会自动同步，请定期导出备份。</p><div class="button-row"><button class="button primary" data-action="export-backup">导出全部备份</button><label class="button soft file-button">恢复备份<input id="restore-v4" type="file" accept=".json"></label><button class="button soft" data-action="export-words">导出单词 CSV</button></div></section><section class="profile-panel"><h2>离线阅读</h2><p class="subtle">已打开的书和查过的词库分片会自动缓存。书籍详情中可提前下载正文与本书词汇。</p><button class="button soft" data-action="cache-info">检查离线缓存</button></section><section class="profile-panel"><h2>阅读与收藏</h2><p>${state.notes.length} 条笔记 · ${state.bookmarks.length} 个书签 · ${state.imports.length} 本本地书籍</p><button class="button soft" data-action="manage-imports">管理本地书籍</button></section><p class="page-footnote"><button data-action="sources">版本、内容来源与使用限制</button> · English Studio 4.2</p>`,
+    )}</div><section class="profile-panel"><h2>本地数据与备份</h2><p class="subtle">学习记录保存在这个浏览器中。清理浏览器数据或更换手机不会自动同步，请定期导出备份。</p><div class="button-row"><button class="button primary" data-action="export-backup">导出全部备份</button><label class="button soft file-button">恢复备份<input id="restore-v4" type="file" accept=".json"></label><button class="button soft" data-action="export-words">导出单词 CSV</button></div></section><section class="profile-panel"><h2>离线阅读</h2><p class="subtle">已打开的书和查过的词库分片会自动缓存。书籍详情中可提前下载正文与本书词汇。</p><button class="button soft" data-action="cache-info">检查离线缓存</button></section><section class="profile-panel"><h2>阅读与收藏</h2><p>${state.notes.length} 条笔记 · ${state.bookmarks.length} 个书签 · ${state.imports.length} 本本地书籍</p><button class="button soft" data-action="manage-imports">管理本地书籍</button></section><p class="page-footnote"><button data-action="sources">版本、内容来源与使用限制</button> · English Studio 4.3</p>`,
     "profile",
   );
 }
 function sources() {
   sheet(
-    "English Studio 4.2",
-    `<p>English Studio 专注于英文阅读、听力练习与词汇积累，学习记录保存在当前浏览器。</p><ul class="source-list"><li>英汉词典：<a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">ECDICT</a>，MIT 许可；<a href="lexicon/LICENSE.txt" target="_blank">许可原文</a>。</li><li>经典全文：Project Gutenberg 提供的公版文本，保留原始来源与许可。<a href="content/SOURCE.md" target="_blank" rel="noopener">12 本原著的完整书单与来源说明</a></li><li>KJV：<a href="bible/SOURCE.md" target="_blank">eBible.org 标准文本与来源说明</a>。</li><li>分级短篇与情境课程：原创示例内容。</li><li>朗读：设备英语 TTS，不是真人有声书。部分设备不提供逐词边界，此时按句高亮。</li><li>在线翻译：可选 MyMemory 免费服务，可能限额、不可用或翻译有误，不上传整本读物。</li></ul><p>新概念四册含本站原创配套，原版教材可导入自己的文件。未来计划继续扩充阅读资源、音频支持与课程练习。</p><a class="button soft wide" href="https://github.com/Aeneas007/english-studio/blob/main/docs/roadmap.md" target="_blank" rel="noopener">项目现状与未来计划 ↗</a>`,
+    "English Studio 4.3",
+    `<p>English Studio 专注于英文阅读、听力练习与词汇积累，学习记录保存在当前浏览器。</p><ul class="source-list"><li>英汉词典：<a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">ECDICT</a>，MIT 许可；<a href="lexicon/LICENSE.txt" target="_blank">许可原文</a>。</li><li>经典全文：Project Gutenberg 提供的公版文本，保留原始来源与许可。<a href="content/SOURCE.md" target="_blank" rel="noopener">12 本原著的完整书单与来源说明</a></li><li>KJV：<a href="bible/SOURCE.md" target="_blank">eBible.org 标准文本与来源说明</a>。</li><li>分级短篇、情境课程与澳洲职业英语：本站原创。<a href="docs/trade-english.md" target="_blank" rel="noopener">职业课程与术语参考</a>。</li><li>朗读：设备英语 TTS，不是真人有声书。部分设备不提供逐词边界，此时按句高亮。</li><li>在线翻译：可选 MyMemory 免费服务，可能限额、不可用或翻译有误，不上传整本读物。</li></ul><p>新概念四册含本站原创配套，原版教材可导入自己的文件。未来计划继续扩充阅读资源、音频支持与课程练习。</p><a class="button soft wide" href="https://github.com/Aeneas007/english-studio/blob/main/docs/roadmap.md" target="_blank" rel="noopener">项目现状与未来计划 ↗</a>`,
   );
 }
 function render() {
@@ -1102,6 +1148,8 @@ function render() {
     else renderReader();
   } else if (next === "textbooks" || next.startsWith("textbooks/")) textbooksPage(next.split("/")[1]);
   else if (next.startsWith("textbook/")) textbookUnitPage(next.split("/")[1]);
+  else if (next === "trades" || next.startsWith("trades/")) tradesPage(next.split("/")[1]);
+  else if (next.startsWith("trade/")) tradeUnitPage(next.split("/")[1]);
   else if (next === "words") wordsPage();
   else if (next === "courses") coursesPage();
   else if (next === "profile") profile();
@@ -1118,6 +1166,9 @@ document.addEventListener("click", async (e) => {
   const d = node.dataset,
     action = d.action;
   if (textbookPractice.handle(d)) return;
+  if (d.tradeTrack) return nav("trades/" + d.tradeTrack);
+  if (d.tradeUnit) return nav("trade/" + d.tradeUnit);
+  if (d.tradeSaveTerm) return saveTradeTerm(d.tradeSaveTerm);
   if (d.textbookVolume) return nav("textbooks/" + d.textbookVolume);
   if (d.textbookUnit) return nav("textbook/" + d.textbookUnit);
   if (d.textbookImport) return importSheet(Number(d.textbookImport));
@@ -1126,13 +1177,13 @@ document.addEventListener("click", async (e) => {
     return openBook("nce-" + volume, { chapter, sentence: 0, offset: 0 });
   }
   if (d.textbookRead) {
-    const unit = textbookUnits.find((item) => item.id === d.textbookRead);
-    const textbook = textbookBooks.find((item) => item.course === unit?.book);
+    const unit = learningUnits.find((item) => item.id === d.textbookRead);
+    const textbook = learningBook(unit);
     if (textbook) return openBook(textbook.id, { chapter: unit.chapter, sentence: 0, offset: 0 });
     return;
   }
   if (d.textbookPractice) {
-    const unit = textbookUnits.find((item) => item.id === d.textbookPractice);
+    const unit = learningUnits.find((item) => item.id === d.textbookPractice);
     if (unit) { speaker.stop(); textbookPractice.start(unit); }
     return;
   }
@@ -1477,15 +1528,14 @@ document.addEventListener("click", async (e) => {
       closeSheet();
       break;
     case "back-books":
-      nav(book?.course ? "textbooks/" + book.course : "books");
+      nav(book?.track ? "trades/" + book.track : book?.course ? "textbooks/" + book.course : "books");
       break;
     case "words":
       closeSheet();
       wordsPage();
       break;
     case "courses":
-      closeSheet();
-      coursesPage();
+      nav("courses");
       break;
     case "contents":
       contents();
@@ -1558,6 +1608,9 @@ document.addEventListener("click", async (e) => {
       break;
     case "nce":
       nce();
+      break;
+    case "trades":
+      nav("trades");
       break;
     case "lookup":
       sheet(
@@ -1687,8 +1740,8 @@ window.addEventListener("pagehide", () => {
 document.addEventListener("input", (e) => {
   const t = e.target;
   if (t.id === "textbook-draft") {
-    const unit = textbookUnits.find((item) => item.id === t.dataset.unitDraft);
-    const textbook = textbookBooks.find((item) => item.course === unit?.book);
+    const unit = learningUnits.find((item) => item.id === t.dataset.unitDraft);
+    const textbook = learningBook(unit);
     if (textbook) {
       const rec = record(textbook.id);
       rec.drafts ||= {};

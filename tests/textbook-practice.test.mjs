@@ -75,3 +75,24 @@ test("restart creates a new attempt and displayed user text is escaped", () => {
   assert.match(renders.at(-1), /&lt;script&gt;/);
   assert.doesNotMatch(renders.at(-1), /<script>|<img src/);
 });
+
+test("workplace practice uses its own context and reading labels while preserving the textbook defaults", () => {
+  const { controller, renders } = setup(), unit = fixture();
+  unit.contextLabel = "HVAC <位置确认>";
+  unit.questionLabel = "场景理解与表达";
+  unit.readingLabel = "返回现场对话";
+  unit.resultPrompt = "练习你自己的工地回应。";
+  delete unit.book;
+  controller.start(unit);
+  assert.match(renders.at(-1), /HVAC &lt;位置确认&gt;/);
+  assert.match(renders.at(-1), /场景理解与表达/);
+  assert.doesNotMatch(renders.at(-1), /第 undefined 册/);
+  while (controller.index < controller.tasks.length) {
+    controller.handle({ textbookAnswer: String(controller.tasks[controller.index].answer) });
+    controller.handle({ textbookNext: "" });
+  }
+  assert.match(renders.at(-1), /返回现场对话/);
+  assert.match(renders.at(-1), /练习你自己的工地回应。/);
+  controller.start(fixture());
+  assert.match(renders.at(-1), /原创配套 · 第 1 册/);
+});
