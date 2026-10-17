@@ -1,10 +1,10 @@
-const SHELL = "english-studio-shell-v4.1.0",
+const SHELL = "english-studio-shell-v4.2.0",
   DATA = "english-studio-data";
 const FILES = [
   "./",
   "./index.html",
-  "./studio/ui.css?v=4.1.0",
-  "./studio/app.mjs?v=4.1.0",
+  "./studio/ui.css?v=4.2.0",
+  "./studio/app.mjs?v=4.2.0",
   "./studio/core.mjs",
   "./studio/lexicon.mjs",
   "./studio/speech.mjs",
@@ -14,6 +14,9 @@ const FILES = [
   "./studio/reader-layout.mjs",
   "./studio/reading-study.mjs",
   "./studio/reading-practice.mjs",
+  "./studio/textbook-data.mjs",
+  "./studio/textbook-ui.mjs",
+  "./studio/textbook-practice.mjs",
   "./reading-data.js",
   "./bible-catalog.js",
   "./classics-catalog.js",

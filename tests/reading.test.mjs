@@ -12,6 +12,7 @@ import {
   defaults,
 } from "../studio/core.mjs";
 import { splitForTranslation } from "../studio/lexicon.mjs";
+import { epubTextChapters } from "../studio/imports.mjs";
 test("dictionary tries exact form before irregular and inflected roots", () => {
   assert.equal(candidates("Children")[0], "children");
   assert.ok(candidates("children").includes("child"));
@@ -55,6 +56,34 @@ test("textbook imports preserve Lesson boundaries and prose", () => {
   assert.equal(c.length, 2);
   assert.equal(c[1].title, "Lesson 2");
   assert.equal(c[1].lines[0][0], "A new day begins.");
+});
+
+test("Chinese lesson headings and a single numbered lesson retain their body", () => {
+  const chapters = textChapters("第1课\nA quiet morning.\n\n第十二课：小河\nThe river is wide.");
+  assert.deepEqual(chapters.map((chapter) => chapter.title), ["第1课", "第十二课：小河"]);
+  assert.deepEqual(chapters.map((chapter) => chapter.lines[0][0]), ["A quiet morning.", "The river is wide."]);
+  const single = textChapters("Lesson 7 A New Path\nWe walk home together.");
+  assert.equal(single[0].title, "Lesson 7 A New Path");
+  assert.equal(single[0].lines[0][0], "We walk home together.");
+});
+
+test("lesson parsing keeps introductory prose and does not split prose mentions", () => {
+  const chapters = textChapters("Welcome to this short course.\n\nLesson 1\nI read Lesson 2 at home.\n\nLesson 2\nWe visit the park.");
+  assert.deepEqual(chapters.map((chapter) => chapter.title), ["Introduction", "Lesson 1", "Lesson 2"]);
+  assert.equal(chapters[0].lines[0][0], "Welcome to this short course.");
+  assert.equal(chapters[1].lines[0][0], "I read Lesson 2 at home.");
+});
+
+test("one EPUB spine document can preserve multiple English or Chinese lessons", () => {
+  const chapters = epubTextChapters("Lesson 1\nWe open the gate.\n\nLesson 2\nA friend brings a map.", "Book One", 8);
+  assert.deepEqual(chapters.map((chapter) => chapter.title), ["Lesson 1", "Lesson 2"]);
+  assert.equal(chapters[1].lines[0][0], "A friend brings a map.");
+  const chinese = epubTextChapters("第1课\nWe open the gate.\n\n第2课\nA friend brings a map.");
+  assert.deepEqual(chinese.map((chapter) => chapter.title), ["第1课", "第2课"]);
+  const ordinary = epubTextChapters("The lantern is red. ".repeat(80), "The Lantern", 8);
+  assert.equal(ordinary.length, 1);
+  assert.equal(ordinary[0].title, "The Lantern");
+  assert.equal(ordinary[0].lines.length, 80);
 });
 test("old reading data, word examples and preferences migrate without loss", () => {
   const entries = {

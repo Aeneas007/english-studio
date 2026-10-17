@@ -63,6 +63,12 @@ function xml(text) {
   if (doc.querySelector("parsererror")) throw Error("EPUB 目录格式有误");
   return doc;
 }
+const explicitChapterHeading = /^(?:Lesson[ \t]+\d+|Chapter[ \t]+[\dIVXLC]+|第[一二三四五六七八九十百\d]+课)(?=[ \t:：.、-]|\r?$)/im;
+export function epubTextChapters(text, heading = "", chapterNumber = 1) {
+  const parsed = textChapters(text);
+  if (explicitChapterHeading.test(text)) return parsed;
+  return parsed.length ? [{ title: heading || "Chapter " + chapterNumber, zh: "第 " + chapterNumber + " 章", lines: parsed.flatMap((chapter) => chapter.lines) }] : [];
+}
 export async function parseFile(file, title, course = 0) {
   if (file.size > 20000000) throw Error("文件超过 20MB，请先拆分");
   let chapters,
@@ -96,18 +102,13 @@ export async function parseFile(file, title, course = 0) {
       const doc = new DOMParser().parseFromString(source, "text/html");
       doc.querySelectorAll("script,style,nav,aside").forEach((n) => n.remove());
       const heading = doc.querySelector("h1,h2")?.textContent.trim();
-      const text = [...doc.querySelectorAll("p")]
+      const text = [...doc.querySelectorAll("h1,h2,h3,p")]
+        .filter((node) => node.tagName.toLowerCase() === "p" || explicitChapterHeading.test(node.textContent.trim()))
         .map((p) => p.textContent.trim())
         .filter(Boolean)
         .join("\n\n");
-      if (text.length < 80) continue;
-      const parsed = textChapters(text);
-      if (parsed.length)
-        chapters.push({
-          title: heading || "Chapter " + (chapters.length + 1),
-          zh: "第 " + (chapters.length + 1) + " 章",
-          lines: parsed.flatMap((c) => c.lines),
-        });
+      if (text.length < 80 && !explicitChapterHeading.test(text)) continue;
+      chapters.push(...epubTextChapters(text, heading, chapters.length + 1));
     }
     if (!chapters.length) throw Error("没有找到可读正文；加密 EPUB 暂不支持");
   } else if (/\.txt$/i.test(file.name)) {

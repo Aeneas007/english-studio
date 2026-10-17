@@ -233,25 +233,19 @@ export const splitSentences = (text) => {
   return lines;
 };
 export function textChapters(text) {
-  const parts = text
-    .replace(/\r/g, "")
-    .split(
-      /(?=^\s*(?:Lesson\s+\d+|Chapter\s+[\dIVXLC]+|第[一二三四五六七八九十百\d]+课)\b)/gim,
-    )
-    .filter((s) => s.trim());
-  if (parts.length > 1)
-    return parts
-      .map((s, i) => {
-        const p = s.trim().split("\n");
-        const title = p.shift().trim();
-        return {
-          title,
-          zh: "第 " + (i + 1) + " 课",
-          lines: splitSentences(p.join("\n")),
-        };
-      })
-      .filter((c) => c.lines.length);
-  const lines = splitSentences(text),
+  const source = String(text).replace(/\r/g, "");
+  const headings = [...source.matchAll(/^[ \t]*(?:Lesson[ \t]+\d+|Chapter[ \t]+[\dIVXLC]+|第[一二三四五六七八九十百\d]+课)(?=[ \t:：.、-]|\n|$)[^\n]*/gim)];
+  if (headings.length) {
+    const chapters = [];
+    const introduction = splitSentences(source.slice(0, headings[0].index));
+    if (introduction.length) chapters.push({ title: "Introduction", zh: "前言", lines: introduction });
+    for (const [i, heading] of headings.entries()) {
+      const lines = splitSentences(source.slice(heading.index + heading[0].length, headings[i + 1]?.index ?? source.length));
+      if (lines.length) chapters.push({ title: heading[0].trim(), zh: "第 " + (i + 1) + " 课", lines });
+    }
+    return chapters;
+  }
+  const lines = splitSentences(source),
     chapters = [];
   for (let i = 0; i < lines.length; i += 35)
     chapters.push({
