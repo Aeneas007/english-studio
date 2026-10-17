@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   candidates,
+  wordRoot,
   textChapters,
   load,
   mergeBackup,
@@ -17,6 +18,35 @@ test("dictionary tries exact form before irregular and inflected roots", () => {
   assert.ok(candidates("running").includes("run"));
   assert.ok(candidates("studies").includes("study"));
   assert.ok(candidates("Alice’s").includes("alice"));
+});
+test("common irregular verbs retain the selected spelling before their base form", () => {
+  const forms = {
+    spent: "spend", stole: "steal", stolen: "steal", kept: "keep",
+    left: "leave", held: "hold", met: "meet", heard: "hear", lost: "lose",
+    paid: "pay", sold: "sell", sent: "send", slept: "sleep", stood: "stand",
+    understood: "understand", began: "begin", broken: "break", caught: "catch",
+    chosen: "choose", drawn: "draw", drove: "drive", fallen: "fall",
+    forgotten: "forget", grown: "grow", hidden: "hide", made: "make",
+    meant: "mean", ridden: "ride", shaken: "shake", shown: "show",
+    spoken: "speak", taught: "teach", thrown: "throw", worn: "wear",
+  };
+  for (const [form, root] of Object.entries(forms)) {
+    const options = candidates(form);
+    assert.equal(options[0], form, form);
+    assert.equal(options[1], root, form);
+    assert.equal(options.filter((option) => option === root).length, 1, form);
+  }
+});
+test("base-form hints do not replace ambiguous exact meanings or invent roots", () => {
+  assert.equal(wordRoot("“SPENT!”"), "spend");
+  assert.equal(wordRoot("left"), "leave");
+  assert.equal(wordRoot("saw"), "see");
+  assert.equal(candidates("left")[0], "left");
+  assert.equal(candidates("saw")[0], "saw");
+  assert.equal(wordRoot("running"), "running");
+  assert.equal(wordRoot("book"), "book");
+  assert.equal(wordRoot("constructor"), "constructor");
+  assert.ok(candidates("constructor").every((option) => typeof option === "string"));
 });
 test("textbook imports preserve Lesson boundaries and prose", () => {
   const c = textChapters(
@@ -92,6 +122,42 @@ test("backup roundtrip restores study data without doubling totals or enabling t
   assert.deepEqual(again.completedLessons, ["hello"]);
   assert.equal(again.terms[0].status, "learning");
   assert.ok(Number.isFinite(again.terms[0].due));
+});
+test("reading offsets and pending study IDs survive storage and backup roundtrips", () => {
+  const data = defaults();
+  data.records = {
+    morning: {
+      chapter: 1,
+      sentence: 3,
+      offset: 27,
+      studyPending: ["term-bank", "term-spend"],
+      updated: 200,
+    },
+    classic: { chapter: 0, sentence: 1, updated: 50 },
+  };
+  const fromStorage = (state) =>
+    load({ getItem: (key) => key === "english-studio-v4" ? JSON.stringify(state) : null });
+  const loaded = fromStorage(data);
+  assert.deepEqual(loaded.records.morning, data.records.morning);
+  assert.equal(loaded.records.classic.offset, undefined);
+  assert.equal(loaded.records.classic.studyPending, undefined);
+
+  const current = defaults();
+  current.records.morning = {
+    chapter: 0, sentence: 0, offset: 0, studyPending: [], updated: 100,
+  };
+  const backup = JSON.parse(JSON.stringify({ format: "english-studio-v4", data: loaded }));
+  const restored = fromStorage(mergeBackup(current, backup));
+  assert.deepEqual(restored.records.morning, data.records.morning);
+  assert.deepEqual(restored.records.classic, data.records.classic);
+  assert.equal(current.records.morning.offset, 0);
+  assert.deepEqual(current.records.morning.studyPending, []);
+
+  const older = structuredClone(backup);
+  older.data.records.morning.offset = 5;
+  older.data.records.morning.studyPending = [];
+  older.data.records.morning.updated = 150;
+  assert.deepEqual(mergeBackup(restored, older).records.morning, restored.records.morning);
 });
 test("review scheduling distinguishes recall difficulty", () => {
   const term = { w: "book", interval: 2, repetitions: 2 };

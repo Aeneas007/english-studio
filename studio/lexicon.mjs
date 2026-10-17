@@ -11,9 +11,11 @@ export async function dictionaryInfo() {
 }
 async function shard(key) {
   if (cache.has(key)) return cache.get(key);
-  const data = await fetch("lexicon/" + key + ".json").then((r) =>
-    r.ok ? r.json() : {},
-  );
+  const response = await fetch("lexicon/" + key + ".json");
+  if (!response.ok) throw Error("词库分片暂不可用");
+  const data = await response.json();
+  if (!data || typeof data !== "object" || Array.isArray(data))
+    throw Error("词库分片格式无效");
   cache.set(key, data);
   return data;
 }
@@ -21,10 +23,19 @@ export async function lookup(word) {
   const list = candidates(word);
   const info = await dictionaryInfo(),
     matches = [];
+  let readable = false,
+    failure;
   for (const w of list) {
     const prefix = w.slice(0, 2).replace(/[ '\-]/g, "_");
     if (!info.shards.includes(prefix)) continue;
-    const data = await shard(prefix);
+    let data;
+    try {
+      data = await shard(prefix);
+      readable = true;
+    } catch (error) {
+      failure ||= error;
+      continue;
+    }
     if (data[w])
       matches.push({
         word: normalize(word),
@@ -36,6 +47,7 @@ export async function lookup(word) {
         source: "ECDICT",
       });
   }
+  if (!readable && failure) throw failure;
   return matches.length
     ? { ...matches[0], alternatives: matches.slice(1) }
     : null;

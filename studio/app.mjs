@@ -7,11 +7,16 @@ import {
   schedule,
   progress,
   textChapters,
+  wordRoot,
 } from "./core.mjs";
 import { lookup, dictionaryInfo, translate } from "./lexicon.mjs";
 import { ReaderSpeech } from "./speech.mjs";
 import { parseFile, makeBook } from "./imports.mjs";
 import { lessons } from "./courses.mjs";
+import { ReaderPopover } from "./reader-popover.mjs";
+import { createReadingStudy, shortMeaning } from "./reading-study.mjs";
+import { buildReadingPages, findReadingPage } from "./reader-layout.mjs";
+import { ReadingPractice } from "./reading-practice.mjs";
 
 const $ = (s) => document.querySelector(s),
   root = $("#studio"),
@@ -27,6 +32,16 @@ let state = load(),
   part = 0,
   parts = [],
   activeSentence = 0,
+  activeOffset = 0,
+  listening = false,
+  lookupResume = null,
+  selectedLookup = null,
+  readingStudy = null,
+  popoverAbort = null,
+  speechUnits = [],
+  openBookToken = 0,
+  ignoreReaderScrollUntil = 0,
+  pendingReaderReflow = false,
   phraseStart = null,
   phraseMode = false,
   sheetToken = 0,
@@ -39,6 +54,23 @@ let state = load(),
   answerLocked = false,
   translationAbort = null,
   sleepUntil = 0;
+const readerPopover = new ReaderPopover(() => {
+  popoverAbort?.abort();
+  popoverAbort = null;
+  document.querySelectorAll(".selected-word").forEach((node) => node.classList.remove("selected-word"));
+  resumeReading();
+});
+function holdReading() {
+  if (!lookupResume) lookupResume = speaker.suspendForLookup();
+}
+function resumeReading() {
+  queueMicrotask(() => {
+    if (modal.open || readerPopover.element.open || !lookupResume) return;
+    const handle = lookupResume;
+    lookupResume = null;
+    speaker.resumeAfterLookup(handle);
+  });
+}
 const loaded = new Map(),
   cachedBooks = new Set(),
   cacheNames = new Set(),
@@ -87,6 +119,10 @@ function day() {
   );
 }
 function nav(target) {
+  openBookToken++;
+  speaker.stop();
+  lookupResume = null;
+  readerPopover.close(false);
   closeSheet();
   location.hash = target;
   if (route === target) render();
@@ -103,11 +139,21 @@ function closeSheet() {
   translationAbort?.abort();
   translationAbort = null;
   if (modal.open) modal.close();
+  if (pendingReaderReflow && book && route.startsWith("read/")) {
+    const heldUnits = speechUnits;
+    buildParts();
+    if (speaker.mode === "paused") speechUnits = heldUnits;
+    part = findReadingPage(parts, activeSentence, activeOffset);
+    renderReader();
+  }
   document
     .querySelectorAll(".selected-word")
     .forEach((n) => n.classList.remove("selected-word"));
+  resumeReading();
 }
 function sheet(title, html, kind = "") {
+  readerPopover.close(false);
+  holdReading();
   sheetToken++;
   modal.className = kind;
   modal.innerHTML = `<div class="sheet-handle"></div><header class="sheet-head"><h2>${title}</h2><button data-action="close" class="round" aria-label="关闭">×</button></header><div class="sheet-content">${html}</div>`;
@@ -117,9 +163,9 @@ function sheet(title, html, kind = "") {
 modal.addEventListener("click", (e) => {
   if (e.target === modal) closeSheet();
 });
-modal.addEventListener("cancel", () => {
-  sheetToken++;
-  translationAbort?.abort();
+modal.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeSheet();
 });
 function shell(content, view) {
   document.body.classList.remove("immersive");
@@ -213,7 +259,12 @@ function library() {
     })
     .catch(() => {});
 }
-async function openBook(id, { chapter, sentence } = {}) {
+async function openBook(id, { chapter, sentence, offset } = {}) {
+  const request = ++openBookToken;
+  clearTimeout(scrollTimer);
+  speaker.stop();
+  lookupResume = null;
+  readerPopover.close(false);
   closeSheet();
   const b = catalog().find((b) => b.id === id);
   if (!b) return toast("没有找到这本书");
@@ -232,9 +283,16 @@ async function openBook(id, { chapter, sentence } = {}) {
         throw Error();
       loaded.set(id, { ...b, chapters: data.chapters });
     } catch {
+      if (request !== openBookToken) return;
       return toast("这本书尚未缓存，请联网后再试");
     }
   }
+  if (request !== openBookToken) return;
+  speaker.stop();
+  speechUnits = [];
+  lookupResume = null;
+  readerPopover.close(false);
+  if (book?.id !== id) listening = false;
   book = loaded.get(id) || b;
   const r = record(id);
   ch = Math.min(
@@ -245,16 +303,14 @@ async function openBook(id, { chapter, sentence } = {}) {
     Math.max(0, sentence ?? r.sentence ?? 0),
     book.chapters[ch].lines.length - 1,
   );
+  activeOffset = Math.max(0, Math.min(offset ?? (sentence === undefined && ch === r.chapter ? r.offset || 0 : 0), book.chapters[ch].lines[activeSentence][0].length));
   state.current = id;
   buildParts();
-  part = Math.max(
-    0,
-    parts.findIndex((p) => activeSentence >= p.start && activeSentence < p.end),
-  );
+  part = findReadingPage(parts, activeSentence, activeOffset);
   location.hash = "read/" + id + "/" + ch;
   route = location.hash.slice(1);
   renderReader();
-  savePosition(activeSentence);
+  savePosition(activeSentence, activeOffset);
   if (activeSentence > parts[part].start) {
     const targetSentence = activeSentence;
     requestAnimationFrame(() => {
@@ -266,21 +322,24 @@ async function openBook(id, { chapter, sentence } = {}) {
   }
 }
 function buildParts() {
-  parts = [];
-  let start = 0,
-    n = 0;
-  const lines = book.chapters[ch].lines;
-  for (let i = 0; i < lines.length; i++) {
-    n += (lines[i][0].match(/[A-Za-z]+/g) || []).length;
-    if (n >= 180 && i + 1 < lines.length) {
-      parts.push({ start, end: i + 1 });
-      start = i + 1;
-      n = 0;
-    }
-  }
-  parts.push({ start, end: lines.length });
+  pendingReaderReflow = false;
+  speechUnits = [];
+  const mobile = window.innerWidth <= 640;
+  const paperWidth = Math.min(760, document.documentElement.clientWidth || window.innerWidth);
+  const canvas = document.createElement("canvas").getContext("2d");
+  if (canvas) canvas.font = `${state.settings.size}px Georgia, "Times New Roman", serif`;
+  parts = buildReadingPages(book.chapters[ch].lines, {
+    width: Math.max(100, paperWidth - (mobile ? 40 : 90) - (listening ? 82 : 45)),
+    height: Math.max(150, window.innerHeight - (mobile ? 284 : 300) - (listening ? 126 : 0)),
+    fontSize: state.settings.size,
+    lineHeight: state.settings.line,
+    paragraphGap: mobile ? 22 : 25,
+    firstPageInset: 115,
+    measureText: canvas ? (text) => canvas.measureText(text).width : undefined,
+  });
+  if (!parts.length) parts = [{ start: 0, end: 1, fragments: [{ index: 0, start: 0, end: 0, text: "" }] }];
 }
-function tokenHTML(text, i) {
+function tokenHTML(text, i, offset = 0) {
   const re = /[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[’'][A-Za-z]+)*/g;
   let p = 0,
     out = "",
@@ -289,44 +348,52 @@ function tokenHTML(text, i) {
   while ((m = re.exec(text))) {
     out += esc(text.slice(p, m.index));
     const t = state.terms.find((t) => t.w === normalize(m[0]));
-    out += `<span class="reader-token ${t && state.settings.known ? "term-" + t.status : ""}" role="button" tabindex="0" data-word="${esc(m[0])}" data-i="${i}" data-token="${n++}" data-start="${m.index}">${esc(m[0])}</span>`;
+    out += `<span class="reader-token ${t && state.settings.known ? "saved-token term-" + t.status : ""}" role="button" tabindex="0" data-word="${esc(m[0])}" data-i="${i}" data-token="${n++}" data-start="${m.index + offset}">${esc(m[0])}</span>`;
     p = re.lastIndex;
   }
   return out + esc(text.slice(p));
 }
 function renderReader() {
   if (!book) return;
+  ignoreReaderScrollUntil = Date.now() + 500;
   activeSentence = Math.min(
     Math.max(0, activeSentence),
     book.chapters[ch].lines.length - 1,
   );
   document.body.classList.add("immersive");
   document.body.dataset.theme = state.settings.theme;
-  root.innerHTML = `<div class="reader-shell"><header class="reading-top"><button class="round" data-action="back-books" aria-label="返回书架">‹</button><div><strong>${esc(book.title)}</strong><small>${esc(book.chapters[ch].title)}</small></div><button class="round" data-action="contents" aria-label="章节目录">☷</button><button class="round" data-action="reader-settings" aria-label="阅读设置">Aa</button></header><div class="reading-track"><i style="width:${record(book.id).percent || 0}%"></i></div><main class="reader-paper" style="--font:${state.settings.size}px;--leading:${state.settings.line}"><div class="reader-chapter-head"><p class="eyebrow">${book.collection === "bible" ? "KING JAMES VERSION" : "CHAPTER " + String(ch + 1).padStart(2, "0")}</p><h1>${esc(book.chapters[ch].title)}</h1><p>${esc(book.chapters[ch].zh || book.zh)} <span>·</span> 第 ${part + 1} / ${parts.length} 页</p></div><div class="reader-mode-strip"><button data-action="phrase-mode" class="${phraseMode ? "selected" : ""}">${phraseMode ? "请依次点选短语首词、末词" : "选短语"}</button><button data-action="translation-toggle">${state.settings.translations ? "隐藏译文" : "双语阅读"}</button><button data-action="marks">书签 / 笔记</button></div><div id="reading-text">${sentenceHTML()}</div><div class="page-turner"><button class="button soft" data-action="prev-page" ${ch === 0 && part === 0 ? "disabled" : ""}>← 上一页</button><span>${Math.min(100, record(book.id).percent || 0)}%</span><button class="button dark" data-action="next-page">${ch === book.chapters.length - 1 && part === parts.length - 1 ? "读完这本书 ✓" : "下一页 →"}</button></div></main><section class="audio-dock"><div class="audio-progress"><span id="audio-caption">${book.chapters[ch].title}</span><button data-action="sleep">${sleepUntil ? "定时关闭中" : "睡眠定时"}</button></div><div class="audio-controls"><button class="round" data-action="audio-prev" aria-label="上一句">│‹</button><button class="play-button" id="reader-play" data-action="play" aria-label="开始朗读">▶</button><button class="round" data-action="audio-next" aria-label="下一句">›│</button><button class="audio-small" data-action="reader-settings">${state.settings.rate}×</button><button class="audio-small" data-action="stop-audio">停止</button></div><small>设备语音 · 听读同步 <span id="offline-label">${navigator.onLine ? "已联网" : "离线模式"}</span></small></section></div>`;
+  const pending = readingPending();
+  root.innerHTML = `<div class="reader-shell ${listening ? "listening" : ""}"><header class="reading-top"><button class="round" data-action="back-books" aria-label="返回书架">‹</button><div class="reader-title"><strong>${esc(book.title)}</strong><small>${esc(book.chapters[ch].title)}</small></div><div class="reader-tools"><button class="round" data-action="listen-mode" aria-label="${listening ? "退出听读" : "开启听读"}" aria-pressed="${listening}">${listening ? "■" : "♫"}</button><button class="reading-study-button ${pending.length >= 5 ? "ready" : ""}" data-action="reading-practice" aria-label="本书 ${pending.length} 个待练习词"><span>◇</span><span class="reader-count">${pending.length}</span></button><button class="round" data-action="contents" aria-label="章节目录">☷</button><button class="round" data-action="reader-settings" aria-label="阅读设置">Aa</button></div></header><div class="reading-position"><input class="reader-seek" id="reader-seek" type="range" min="0" max="${parts.length - 1}" value="${part}" aria-label="本章阅读页码"><span class="reader-page-label">第 ${ch + 1} 章 · ${part + 1}/${parts.length}</span></div><main class="reader-paper" style="--font:${state.settings.size}px;--leading:${state.settings.line}">${part === 0 ? `<div class="reader-chapter-head"><p class="eyebrow">${book.collection === "bible" ? "KING JAMES VERSION" : "CHAPTER " + String(ch + 1).padStart(2, "0")}</p><h1>${esc(book.chapters[ch].title)}</h1></div>` : ""}<div class="reader-mode-strip"><button data-action="phrase-mode" class="${phraseMode ? "selected" : ""}">${phraseMode ? "请依次点选短语首词、末词" : "选短语"}</button><button data-action="translation-toggle">${state.settings.translations ? "隐藏译文" : "双语阅读"}</button><button data-action="marks">书签 / 笔记</button></div><div id="reading-text">${sentenceHTML()}</div></main><footer class="reader-footer"><button data-action="prev-page" ${ch === 0 && part === 0 ? "disabled" : ""}>‹ 上一页</button><span>${part + 1} / ${parts.length}<small> · ${Math.min(100, record(book.id).percent || 0)}%</small></span><button data-action="next-page">${ch === book.chapters.length - 1 && part === parts.length - 1 ? "读完 ✓" : "下一页 ›"}</button></footer><section class="audio-dock" aria-label="听读控制"><div class="audio-progress"><span id="audio-caption">${esc(book.chapters[ch].title)}</span><button data-action="sleep">${sleepUntil ? "定时关闭中" : "睡眠定时"}</button></div><div class="audio-controls"><button class="round" data-action="audio-prev" aria-label="上一句">│‹</button><button class="play-button" id="reader-play" data-action="play" aria-label="${speaker.mode === "playing" ? "暂停朗读" : "开始朗读"}">${speaker.mode === "playing" ? "Ⅱ" : "▶"}</button><button class="round" data-action="audio-next" aria-label="下一句">›│</button><button class="audio-small" data-action="reader-settings">${state.settings.rate}×</button><button class="audio-small" data-action="stop-audio">停止</button></div><small>设备语音 · <span id="offline-label">${navigator.onLine ? "已联网" : "离线模式"}</span></small></section></div>`;
   document.documentElement.scrollTop = 0;
+}
+function visibleFragment(i) {
+  return parts[part].fragments.find((fragment) => fragment.index === i);
 }
 function sentenceHTML() {
   const range = parts[part],
     lines = book.chapters[ch].lines;
   let out = "";
-  for (let i = range.start; i < range.end; i++) {
+  for (const fragment of range.fragments) {
+    const i = fragment.index;
     const l = lines[i],
-      translated = l[1] || state.translations[l[0]],
+      translated = (fragment.start === 0 && fragment.end === l[0].length ? l[1] : "") || state.translations[fragment.text],
       mark = state.bookmarks.some(
         (m) => m.book === book.id && m.chapter === ch && m.sentence === i,
       );
-    out += `<section class="reading-sentence ${mark ? "marked" : ""}" id="sentence-${i}" data-sentence="${i}"><div class="sentence-english">${book.collection === "bible" ? `<sup>${l[2] || i + 1}</sup>` : ""}${tokenHTML(l[0], i)}</div><button class="sentence-tools" data-sentence-sheet="${i}" aria-label="第 ${i + 1} 句翻译与操作">⋯</button>${state.settings.translations ? `<div class="parallel-translation" id="translation-${i}">${translated ? esc(translated) : `<button data-translate="${i}">点击翻译这句${state.settings.online ? "" : " · 需开启在线翻译"}</button>`}</div>` : ""}</section>`;
+    out += `<section class="reading-sentence ${mark ? "marked" : ""}" id="sentence-${i}" data-sentence="${i}" data-offset="${fragment.start}">${listening ? `<button class="sentence-play" data-start-sentence="${i}" data-offset="${fragment.start}" aria-label="从这一句听">▶</button>` : ""}<div class="sentence-english">${book.collection === "bible" ? `<sup>${l[2] || i + 1}</sup>` : ""}${tokenHTML(fragment.text, i, fragment.start)}</div><button class="sentence-translate" data-sentence-translate="${i}" aria-label="翻译这一句" aria-expanded="false">译</button>${state.settings.translations ? `<div class="parallel-translation" id="translation-${i}">${translated ? esc(translated) : `<button data-sentence-translate="${i}">点击翻译这句</button>`}</div>` : ""}</section>`;
   }
   return out;
 }
-function savePosition(i) {
+function savePosition(i, offset = 0) {
   if (!book) return;
   activeSentence = i;
+  activeOffset = Math.max(0, Number(offset) || 0);
   const r = record(book.id);
   Object.assign(r, {
     chapter: ch,
     sentence: i,
-    percent: progress(book, ch, i),
+    offset: activeOffset,
+    percent: progress(book, ch, i + activeOffset / Math.max(1, book.chapters[ch].lines[i][0].length)),
     updated: Date.now(),
   });
   state.current = book.id;
@@ -335,6 +402,10 @@ function savePosition(i) {
   if (bar) bar.style.width = r.percent + "%";
 }
 function turnPage(delta) {
+  clearTimeout(scrollTimer);
+  speechUnits = [];
+  readerPopover.close(false);
+  lookupResume = null;
   speaker.stop();
   phraseStart = null;
   if (delta > 0) {
@@ -350,7 +421,7 @@ function turnPage(delta) {
     buildParts();
     part = parts.length - 1;
   }
-  savePosition(parts[part].start);
+  savePosition(parts[part].start, parts[part].fragments[0].start);
   history.replaceState(null, "", "#read/" + book.id + "/" + ch);
   route = location.hash.slice(1);
   renderReader();
@@ -375,6 +446,9 @@ function updateSpeech(s) {
     );
   }
   if (!book || !route.startsWith("read/")) return;
+  const unit = speechUnits[s.index];
+  const sourceIndex = unit?.index ?? s.index;
+  const sourceOffset = (unit?.start || 0) + Math.max(0, s.word);
   const statusCaption = $("#audio-caption");
   if (statusCaption && s.mode !== "playing")
     statusCaption.textContent =
@@ -394,7 +468,7 @@ function updateSpeech(s) {
     toast("定时朗读已结束");
     return;
   }
-  const target = parts.findIndex((p) => s.index >= p.start && s.index < p.end);
+  const target = findReadingPage(parts, sourceIndex, sourceOffset);
   if (target >= 0 && target !== part) {
     part = target;
     renderReader();
@@ -402,35 +476,64 @@ function updateSpeech(s) {
   document
     .querySelectorAll(".reading-sentence.speaking,.reader-token.speaking-word")
     .forEach((n) => n.classList.remove("speaking", "speaking-word"));
-  const sentence = $("#sentence-" + s.index);
+  const sentence = $("#sentence-" + sourceIndex);
   if (sentence) {
     sentence.classList.add("speaking");
     if (s.word >= 0) {
       const tokens = [...sentence.querySelectorAll(".reader-token")];
       const t = tokens.find(
         (n, i) =>
-          Number(n.dataset.start) <= s.word &&
-          (!tokens[i + 1] || Number(tokens[i + 1].dataset.start) > s.word),
+          Number(n.dataset.start) <= sourceOffset &&
+          (!tokens[i + 1] || Number(tokens[i + 1].dataset.start) > sourceOffset),
       );
       t?.classList.add("speaking-word");
     }
-    if (activeSentence !== s.index) {
-      savePosition(s.index);
+    if (activeSentence !== sourceIndex || activeOffset !== sourceOffset) {
+      savePosition(sourceIndex, sourceOffset);
+    }
+    if (s.word < 0) {
       sentence.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }
   const caption = $("#audio-caption");
   if (caption)
-    caption.textContent = `${s.mode === "playing" ? "正在朗读" : "已暂停"} · 第 ${s.index + 1} / ${book.chapters[ch].lines.length} 句`;
+    caption.textContent = `正在听读 · ${s.index + 1} / ${speechUnits.length}`;
 }
-function playFrom(i) {
+function collectSpeechUnits() {
+  const segmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter("en", { granularity: "sentence" }) : null;
+  return parts.flatMap((page) => page.fragments.flatMap((fragment) => {
+    if (!segmenter) return [fragment];
+    return [...segmenter.segment(fragment.text)].filter((item) => item.segment.trim()).map((item) => ({ index: fragment.index, start: fragment.start + item.index, end: fragment.start + item.index + item.segment.length, text: item.segment }));
+  }));
+}
+function speechUnitAt(i, offset) {
+  const index = speechUnits.findIndex((unit) => unit.index > i || (unit.index === i && offset < unit.end));
+  return index >= 0 ? index : Math.max(0, speechUnits.length - 1);
+}
+function stepSpeech(delta) {
+  if (!speechUnits.length) speechUnits = collectSpeechUnits();
+  const index = speechUnitAt(activeSentence, activeOffset);
+  const unit = speechUnits[Math.max(0, Math.min(speechUnits.length - 1, index + delta))];
+  if (unit) playFrom(unit.index, unit.start);
+}
+function playFrom(i, offset = 0) {
   try {
-    speaker.play(book.chapters[ch].lines, i, state.settings, () => {
+    if (!listening) {
+      listening = true;
+      buildParts();
+      part = findReadingPage(parts, i, offset);
+      renderReader();
+    }
+    speechUnits = collectSpeechUnits();
+    const start = speechUnitAt(i, offset);
+    speaker.play(speechUnits.map((unit) => [unit.text]), start, state.settings, () => {
       if (state.settings.autoNext && ch < book.chapters.length - 1) {
         ch++;
         buildParts();
         part = 0;
         savePosition(0);
+        history.replaceState(null, "", "#read/" + book.id + "/" + ch);
+        route = location.hash.slice(1);
         renderReader();
         playFrom(0);
       } else toast("本章朗读完成");
@@ -439,13 +542,138 @@ function playFrom(i) {
     toast(e.message);
   }
 }
+function readingPending() {
+  if (!book) return [];
+  const pending = record(book.id).studyPending;
+  const ids = Array.isArray(pending) ? [...new Set(pending.filter((id) => typeof id === "string"))] : [];
+  return ids.map((id) => state.terms.find((term) => term.w === id)).filter((term) => term?.meaning);
+}
+function queueReadingWord(term) {
+  const r = record(book.id);
+  r.studyPending = [...new Set([...readingPending().map((item) => item.w), term.w])];
+  r.updated = Date.now();
+  save();
+  const button = $('[data-action="reading-practice"]');
+  if (button) {
+    const count = readingPending().length;
+    button.querySelector(".reader-count").textContent = count;
+    button.classList.toggle("ready", count >= 5);
+    button.setAttribute("aria-label", `本书 ${count} 个待练习词`);
+  }
+}
+const practice = new ReadingPractice({
+  render: (html) => sheet("把刚遇见的词记下来", html, "reading-study-sheet"),
+  onPronounce: (word) => speaker.preview(word, state.settings),
+  onExit: () => { readingStudy = null; closeSheet(); },
+  onComplete: ({ words: studied, correct, total }) => {
+    if (!book) return;
+    const ids = new Set(studied.map((word) => word.id));
+    const r = record(book.id);
+    r.studyPending = readingPending().map((term) => term.w).filter((id) => !ids.has(id));
+    r.studySessions = (Number(r.studySessions) || 0) + 1;
+    r.lastStudy = { correct, total, at: Date.now() };
+    r.updated = Date.now();
+    save();
+    renderReader();
+  },
+});
+function startReadingPractice() {
+  const terms = readingPending();
+  if (createReadingStudy(terms).words.length < 2) {
+    return sheet("把阅读里的词连起来", `<p>在正文点词后，点“加入本组”。凑满 5 个就能做一组配对和词义练习；已有 2 个不同词义时也可以提前开始。</p><p class="subtle">本书已收集 ${terms.length} 个待练习词。单词同时保留在单词本中，按原来的计划复习。</p><button class="button primary wide" data-action="close">继续阅读</button>`);
+  }
+  holdReading();
+  readingStudy = { book: book.id, chapter: ch, sentence: activeSentence, offset: activeOffset };
+  practice.start(terms);
+}
+function clearReaderSelection() {
+  document.querySelectorAll(".selected-word").forEach((node) => node.classList.remove("selected-word"));
+}
+async function wordPopover(term, index, anchor, offset = 0) {
+  holdReading();
+  popoverAbort?.abort();
+  clearReaderSelection();
+  anchor.classList.add("selected-word");
+  savePosition(index, offset);
+  const token = readerPopover.show(anchor, `<div class="popover-header"><strong class="popover-term">${esc(term)}</strong><button class="popover-close" data-action="popover-close" aria-label="关闭词卡">×</button></div><p class="popover-status">正在查词…</p>`, "word-popover", term + "的词义");
+  const existing = state.terms.find((entry) => entry.w === normalize(term));
+  let result;
+  try { result = await lookup(term); } catch {}
+  if (token !== readerPopover.version || !readerPopover.element.open) return;
+  const meaning = existing?.meaning || result?.meaning || window.READING_GLOSSARY?.[normalize(term)] || "";
+  selectedLookup = { kind: "word", term, index, offset, result, meaning };
+  const rootForm = wordRoot(term);
+  const rootEntry = rootForm !== normalize(term) ? [result, ...(result?.alternatives || [])].find((entry) => entry?.base === rootForm) : null;
+  const pending = readingPending().some((entry) => entry.w === normalize(term));
+  readerPopover.element.innerHTML = `<div class="popover-header"><strong class="popover-term">${esc(term)}</strong><button class="popover-close" data-action="popover-close" aria-label="关闭词卡">×</button></div><p class="popover-phonetic">${result?.phonetic ? "/" + esc(result.phonetic) + "/" : ""}${rootEntry ? ` <span>原形 ${esc(rootForm)}</span>` : result?.base && result.base !== normalize(term) ? ` <span>原形 ${esc(result.base)}</span>` : ""}</p><p class="popover-meaning">${esc(shortMeaning(meaning, 85) || "本站词库暂未查到释义")}</p>${rootEntry && rootEntry.meaning !== meaning ? `<p class="popover-status">${esc(rootForm)} · ${esc(shortMeaning(rootEntry.meaning, 45))}</p>` : ""}<div class="popover-actions"><button class="button soft" data-pronounce="${esc(term)}" aria-label="朗读 ${esc(term)}">▶ 发音</button><button class="button primary" data-action="popover-save" ${!meaning || pending ? "disabled" : ""}>${pending ? "已加入本组 ✓" : existing ? "加入本组练习" : "＋ 加入本组"}</button></div><button class="popover-more" data-action="word-more">完整词义 · 编辑 · 原句 ›</button><small class="popover-status">${existing ? "已收藏在单词本" : "加入后会同时保存到单词本"}</small>`;
+  readerPopover.position();
+}
+function savePopoverWord() {
+  if (selectedLookup?.kind !== "word" || !selectedLookup.meaning || !book) return;
+  const { term, index, offset, meaning, result } = selectedLookup;
+  let saved = state.terms.find((entry) => entry.w === normalize(term));
+  if (!saved) {
+    saved = { w: normalize(term), meaning, phonetic: result?.phonetic || "", example: book.chapters[ch].lines[index][0], source: book.title, book: book.id, chapter: ch, sentence: index, offset, status: "learning", due: Date.now(), interval: 0, repetitions: 0, added: Date.now() };
+    state.terms.push(saved);
+    day().words++;
+  }
+  queueReadingWord(saved);
+  readerPopover.close();
+  refreshText();
+  toast(readingPending().length >= 5 ? "已凑齐一组，点顶部 ◇ 开始练习" : "已加入本组，也保存在单词本 ✓");
+}
+function sentencePopover(index, anchor) {
+  const fragment = visibleFragment(index);
+  if (!fragment) return;
+  holdReading();
+  popoverAbort?.abort();
+  const line = book.chapters[ch].lines[index];
+  const text = fragment.text.trim();
+  const provided = fragment.start === 0 && fragment.end === line[0].length ? line[1] : "";
+  const translated = provided || state.translations[text];
+  selectedLookup = { kind: "sentence", index, offset: fragment.start, text };
+  anchor.setAttribute("aria-expanded", "true");
+  readerPopover.show(anchor, `<div class="popover-header"><strong>这句的意思</strong><button class="popover-close" data-action="popover-close" aria-label="关闭译文">×</button></div><div class="popover-translation" id="popover-translation">${translated ? esc(translated) : state.settings.online ? "正在翻译…" : `<p>这句话还没有本地译文。</p><label class="checkbox"><input id="popover-online-consent" type="checkbox">允许把点选的文字发给 MyMemory 翻译</label><button class="button primary wide" data-action="popover-enable-translate">开启并翻译这一句</button><p class="micro">只发送你点选的文字，译文保存在本机。</p>`}</div><div class="popover-actions"><button class="button soft" data-start-sentence="${index}" data-offset="${fragment.start}">▶ 从这里听</button><button class="popover-more" data-sentence-sheet="${index}">书签 / 笔记 ›</button></div>${translated ? `<small class="popover-status">${provided ? "配套中文译文" : "缓存的机器译文 · 请结合语境"}</small>` : ""}`, "sentence-popover translation-popover", "句子译文");
+  if (!translated && state.settings.online) translatePopover();
+}
+async function translatePopover() {
+  if (selectedLookup?.kind !== "sentence" || !state.settings.online) return;
+  const { text, index } = selectedLookup;
+  const version = readerPopover.version;
+  const box = $("#popover-translation");
+  if (!box) return;
+  box.textContent = "正在翻译…";
+  popoverAbort?.abort();
+  const controller = new AbortController();
+  popoverAbort = controller;
+  const timer = setTimeout(() => controller.abort(), 18000);
+  try {
+    const result = await translate(text, controller.signal);
+    if (version !== readerPopover.version || controller.signal.aborted) return;
+    const decoded = new DOMParser().parseFromString(result, "text/html").body.textContent;
+    state.translations[text] = decoded;
+    const keys = Object.keys(state.translations);
+    if (keys.length > 2000) delete state.translations[keys[0]];
+    save();
+    box.innerHTML = `${esc(decoded)}<small class="translation-label">MyMemory 机器翻译 · 请结合语境</small>`;
+    const inline = $("#translation-" + index);
+    if (inline) inline.textContent = decoded;
+  } catch (error) {
+    if (version !== readerPopover.version) return;
+    box.innerHTML = `<p>${esc(error.name === "AbortError" ? "翻译超时，请再试一次" : error.message)}</p><button class="button soft" data-action="popover-retry-translate">重试</button>`;
+  } finally {
+    clearTimeout(timer);
+    if (popoverAbort === controller) popoverAbort = null;
+    readerPopover.position();
+  }
+}
 function detail(id) {
   const b = catalog().find((x) => x.id === id);
   if (!b) return;
   const r = record(id);
   sheet(
     esc(b.zh),
-    `<div class="book-detail-layout">${cover(b, true)}<div><h3>${esc(b.title)}</h3><p>${esc(b.author || "English Studio")}</p>${badge(b.level)}<p class="subtle">${b.chapters.length} 章 · ${words(b).toLocaleString()} 词</p></div></div><p class="detail-description">${esc(b.description || "从点词开始，进入你的下一段英文旅程。")}</p><div class="button-row"><button class="button primary" data-open="${esc(id)}">${r.updated ? "继续阅读" : "开始阅读"} →</button><button class="button soft" data-favorite="${esc(id)}">${r.favorite ? "已收藏 ♥" : "收藏 ♡"}</button></div><button class="button soft wide" data-cache-book="${esc(id)}">↓ 下载正文与本书词汇，供离线阅读</button><p class="micro">${b.source ? `<a href="${esc(b.source)}" target="_blank" rel="noopener">查看原文来源 ↗</a>` : "原创故事或本地导入内容"} · 朗读使用设备语音</p>`,
+    `<div class="book-detail-layout">${cover(b, true)}<div><h3>${esc(b.title)}</h3><p>${esc(b.author || "English Studio")}</p>${badge(b.level)}<p class="subtle">${b.chapters.length} 章 · ${words(b).toLocaleString()} 词<br>约 ${Math.max(1, Math.ceil(words(b) / 120))} 分钟 · 阅读时长估算</p></div></div><p class="detail-description">${esc(b.description || "从点词开始，进入你的下一段英文旅程。")}</p><div class="button-row"><button class="button primary" data-open="${esc(id)}">${r.updated ? "继续阅读" : "开始阅读"} →</button><button class="button soft" data-listen-book="${esc(id)}">♫ 听读</button><button class="button soft" data-favorite="${esc(id)}">${r.favorite ? "已收藏 ♥" : "收藏 ♡"}</button></div><button class="button soft wide" data-cache-book="${esc(id)}">↓ 下载正文与本书词汇，供离线阅读</button><p class="micro">${b.source ? `<a href="${esc(b.source)}" target="_blank" rel="noopener">查看原文来源 ↗</a>` : "原创故事或本地导入内容"} · 朗读使用设备语音</p>`,
   );
 }
 async function termSheet(
@@ -454,7 +682,6 @@ async function termSheet(
   { phrase = false } = {},
 ) {
   if (book?.chapters[ch]?.lines[index]) activeSentence = index;
-  speaker.mode === "playing" && speaker.toggle();
   const context = book?.chapters[ch]?.lines[index]?.[0] || "",
     existing = state.terms.find((t) => t.w === normalize(term));
   const token = sheet(
@@ -476,6 +703,7 @@ async function termSheet(
   modal.dataset.termContext = context;
   modal.dataset.termSource = book?.title || "词典查询";
   modal.dataset.termPhonetic = result?.phonetic || "";
+  modal.dataset.termOffset = String(activeOffset);
   if (!meaning) $("#meaning-editor").classList.remove("hidden");
 }
 function sentenceSheet(i) {
@@ -488,7 +716,6 @@ function sentenceSheet(i) {
     marked = state.bookmarks.some(
       (n) => n.book === book.id && n.chapter === ch && n.sentence === i,
     );
-  speaker.mode === "playing" && speaker.toggle();
   sheet(
     "读懂这一句",
     `<p class="sentence-quote">${esc(l[0])}</p><div class="translation-result" id="sentence-translation-result">${esc(translated || "还没有这句话的译文。")}</div><div class="button-row"><button class="button primary" data-translate="${i}">${translated ? "重新翻译" : "翻译整句"}</button><button class="button soft" data-start-sentence="${i}">▶ 从这里听</button><button class="button soft" data-bookmark="${i}">${marked ? "取消书签" : "◇ 添加书签"}</button></div><label class="field-label">我的笔记<textarea id="note-text" rows="3" placeholder="写下理解、语法或自己的例句…">${esc(note?.text || "")}</textarea></label><button class="button soft wide" data-save-note="${i}">保存笔记</button><p class="micro">已收藏的原文例句可在单词页反复练习。</p>`,
@@ -586,12 +813,12 @@ function marks() {
       .filter((n) => book.chapters[n.chapter]?.lines[n.sentence])
       .map(
         (n) =>
-          `<button class="mark-item" data-jump-mark="${n.chapter}:${n.sentence}"><small>第 ${n.chapter + 1} 章</small><p>${esc(isNote ? n.text : book.chapters[n.chapter].lines[n.sentence][0])}</p></button>`,
+          `<button class="mark-item" data-jump-mark="${n.chapter}:${n.sentence}:${n.offset || 0}"><small>第 ${n.chapter + 1} 章</small><p>${esc(isNote ? n.text : book.chapters[n.chapter].lines[n.sentence][0])}</p></button>`,
       )
       .join("");
   sheet(
     "书签与笔记",
-    `<h3>书签 · ${marks.length}</h3>${rows(marks, false) || '<p class="subtle">点击句子旁 ⋯ 可添加书签。</p>'}<h3>笔记 · ${notes.length}</h3>${rows(notes, true) || '<p class="subtle">还没有笔记。</p>'}`,
+    `<h3>书签 · ${marks.length}</h3>${rows(marks, false) || '<p class="subtle">点击句子旁“译”，再打开书签 / 笔记。</p>'}<h3>笔记 · ${notes.length}</h3>${rows(notes, true) || '<p class="subtle">还没有笔记。</p>'}`,
   );
 }
 function importSheet(course = 0) {
@@ -692,7 +919,7 @@ function renderReview() {
   }
   options.sort(() => Math.random() - 0.5);
   shell(
-    `<div class="review-session"><button class="link-button" data-action="words">← 退出复习</button><div class="session-progress"><i style="width:${(reviewIndex / review.length) * 100}%"></i></div><p class="eyebrow">${reviewIndex + 1} / ${review.length} · ${mode === "choice" ? "选出正确释义" : mode === "listen" ? "听音辨词" : "拼写回忆"}</p><div class="review-prompt">${mode === "listen" ? `<button class="listen-bubble" data-pronounce="${esc(t.w)}" aria-label="听单词">▶</button><h2>你听到了哪个词？</h2>` : mode === "spell" ? `<h2>${esc(t.meaning.split("\n")[0])}</h2><button class="button soft" data-pronounce="${esc(t.w)}">听发音</button>` : `<h1>${esc(t.w)}</h1><button class="button soft" data-pronounce="${esc(t.w)}">▶ 听发音</button>`}</div>${mode === "spell" ? '<div class="spelling-answer"><input id="spelling" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="输入英文" aria-label="拼写单词"><button class="button primary" data-action="check-spelling">检查</button></div>' : `<div class="review-options">${options.map((o) => `<button data-review-answer="${esc(o.w)}">${esc(mode === "listen" ? o.w : o.meaning.split("\n")[0])}</button>`).join("")}</div>`}<div id="review-feedback"></div><div id="review-grades" class="hidden"><div class="context-box"><span>你读过的句子</span><p>${esc(t.example || "这个词来自你的收藏。")}</p><small>${esc(t.source || "")}</small></div><div class="button-row"><button class="button soft" data-review-grade="again">再学一次 · 10分钟</button><button class="button primary" data-review-grade="good">记住了</button><button class="button soft" data-review-grade="easy">很熟悉</button></div></div></div>`,
+    `<div class="review-session"><button class="link-button" data-action="words">← 退出复习</button><div class="session-progress"><i style="width:${(reviewIndex / review.length) * 100}%"></i></div><p class="eyebrow">${reviewIndex + 1} / ${review.length} · ${mode === "choice" ? "选出正确释义" : mode === "listen" ? "听音辨词" : "拼写回忆"}</p><div class="review-prompt">${mode === "listen" ? `<button class="listen-bubble" data-pronounce="${esc(t.w)}" aria-label="听单词">▶</button><h2>你听到了哪个词？</h2>` : mode === "spell" ? `<h2>${esc(t.meaning.split("\n")[0])}</h2><button class="button soft" data-pronounce="${esc(t.w)}">听发音</button>` : `<h1>${esc(t.w)}</h1><button class="button soft" data-pronounce="${esc(t.w)}">▶ 听发音</button>`}</div>${mode === "spell" ? '<div class="spelling-answer"><input id="spelling" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="输入英文" aria-label="拼写单词"><button class="button primary" data-action="check-spelling">检查</button></div>' : `<div class="review-options">${options.map((o) => `<button data-review-answer="${esc(o.w)}">${esc(mode === "listen" ? o.w : o.meaning.split("\n")[0])}</button>`).join("")}</div>`}<div id="review-feedback"></div><div id="review-grades" class="hidden"><details class="review-context"><summary>查看原句 · ${esc(t.source || "我的收藏")}</summary><p>${esc(t.example || "这个词来自你的收藏。")}</p></details><div class="button-row review-grade-actions"><button class="button soft" data-review-grade="again">再学一次 · 10分钟</button><button class="button primary" data-review-grade="good">记住了</button><button class="button soft" data-review-grade="easy">很熟悉</button></div></div></div>`,
     "words",
   );
   if (mode === "listen")
@@ -784,21 +1011,26 @@ function profile() {
       },
     ).join(
       "",
-    )}</div><section class="profile-panel"><h2>本地数据与备份</h2><p class="subtle">学习记录保存在这个浏览器中。清理浏览器数据或更换手机不会自动同步，请定期导出备份。</p><div class="button-row"><button class="button primary" data-action="export-backup">导出全部备份</button><label class="button soft file-button">恢复备份<input id="restore-v4" type="file" accept=".json"></label><button class="button soft" data-action="export-words">导出单词 CSV</button></div></section><section class="profile-panel"><h2>离线阅读</h2><p class="subtle">已打开的书和查过的词库分片会自动缓存。书籍详情中可提前下载正文与本书词汇。</p><button class="button soft" data-action="cache-info">检查离线缓存</button></section><section class="profile-panel"><h2>阅读与收藏</h2><p>${state.notes.length} 条笔记 · ${state.bookmarks.length} 个书签 · ${state.imports.length} 本本地书籍</p><button class="button soft" data-action="manage-imports">管理本地书籍</button></section><p class="page-footnote"><button data-action="sources">版本、内容来源与使用限制</button> · English Studio 4.0</p>`,
+    )}</div><section class="profile-panel"><h2>本地数据与备份</h2><p class="subtle">学习记录保存在这个浏览器中。清理浏览器数据或更换手机不会自动同步，请定期导出备份。</p><div class="button-row"><button class="button primary" data-action="export-backup">导出全部备份</button><label class="button soft file-button">恢复备份<input id="restore-v4" type="file" accept=".json"></label><button class="button soft" data-action="export-words">导出单词 CSV</button></div></section><section class="profile-panel"><h2>离线阅读</h2><p class="subtle">已打开的书和查过的词库分片会自动缓存。书籍详情中可提前下载正文与本书词汇。</p><button class="button soft" data-action="cache-info">检查离线缓存</button></section><section class="profile-panel"><h2>阅读与收藏</h2><p>${state.notes.length} 条笔记 · ${state.bookmarks.length} 个书签 · ${state.imports.length} 本本地书籍</p><button class="button soft" data-action="manage-imports">管理本地书籍</button></section><p class="page-footnote"><button data-action="sources">版本、内容来源与使用限制</button> · English Studio 4.1</p>`,
     "profile",
   );
 }
 function sources() {
   sheet(
-    "English Studio 4.0",
+    "English Studio 4.1",
     `<p>English Studio 专注于英文阅读、听力练习与词汇积累，学习记录保存在当前浏览器。</p><ul class="source-list"><li>英汉词典：<a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">ECDICT</a>，MIT 许可；<a href="lexicon/LICENSE.txt" target="_blank">许可原文</a>。</li><li>经典全文：Project Gutenberg 提供的公版文本，保留原始来源与许可。<a href="content/sources/alice.txt" target="_blank">爱丽丝原文件</a> · <a href="content/sources/treasure.txt" target="_blank">金银岛原文件</a> · <a href="content/sources/garden.txt" target="_blank">秘密花园原文件</a></li><li>KJV：<a href="bible/SOURCE.md" target="_blank">eBible.org 标准文本与来源说明</a>。</li><li>分级短篇与情境课程：原创示例内容。</li><li>朗读：设备英语 TTS，不是真人有声书。部分设备不提供逐词边界，此时按句高亮。</li><li>在线翻译：可选 MyMemory 免费服务，可能限额、不可用或翻译有误，不上传整本读物。</li></ul><p>新概念教材需导入自己的文件。未来计划扩充阅读资源、音频支持与课程练习。</p><a class="button soft wide" href="https://github.com/Aeneas007/english-studio/blob/main/docs/roadmap.md" target="_blank" rel="noopener">项目现状与未来计划 ↗</a>`,
   );
 }
 function render() {
   const next = location.hash.slice(1) || "books";
   if (!next.startsWith("read/")) {
+    openBookToken++;
+    readerPopover.close(false);
+    lookupResume = null;
     speaker.stop();
     book = null;
+    speechUnits = [];
+    listening = false;
     phraseMode = false;
     phraseStart = null;
   }
@@ -815,11 +1047,21 @@ function render() {
 }
 
 document.addEventListener("click", async (e) => {
+  if (Date.now() < suppressReaderClickUntil && e.target.closest(".reader-paper")) {
+    e.preventDefault();
+    return;
+  }
   const node = e.target.closest("button,[data-word]");
   if (!node) return;
   const d = node.dataset,
     action = d.action;
+  if (readingStudy && practice.handle(d)) return;
   if (d.open) return openBook(d.open);
+  if (d.listenBook) {
+    await openBook(d.listenBook);
+    if (book?.id === d.listenBook && route.startsWith("read/")) playFrom(activeSentence, activeOffset);
+    return;
+  }
   if (d.detail) return detail(d.detail);
   if (d.favorite) {
     const r = record(d.favorite);
@@ -862,8 +1104,10 @@ document.addEventListener("click", async (e) => {
       return termSheet(text, i, { phrase: true });
     }
     node.classList.add("selected-word");
-    return termSheet(d.word, i);
+    return wordPopover(d.word, i, node, Number(d.start) || 0);
   }
+  if (d.sentenceTranslate !== undefined)
+    return sentencePopover(Number(d.sentenceTranslate), node);
   if (d.sentenceSheet !== undefined)
     return sentenceSheet(Number(d.sentenceSheet));
   if (d.pronounce) {
@@ -889,6 +1133,7 @@ document.addEventListener("click", async (e) => {
         book: book?.id,
         chapter: ch,
         sentence: Number(d.index) || 0,
+        offset: Number(modal.dataset.termOffset) || 0,
         status: "learning",
         due: Date.now(),
         interval: 0,
@@ -897,6 +1142,7 @@ document.addEventListener("click", async (e) => {
       });
       day().words++;
     }
+    if (book && route.startsWith("read/")) queueReadingWord(previous || state.terms.find((term) => term.w === d.saveTerm));
     save();
     closeSheet();
     if (book) refreshText();
@@ -929,8 +1175,10 @@ document.addEventListener("click", async (e) => {
     return translationFor(text);
   }
   if (d.startSentence !== undefined) {
+    readerPopover.close(false);
+    lookupResume = null;
     closeSheet();
-    return playFrom(Number(d.startSentence));
+    return playFrom(Number(d.startSentence), Number(d.offset) || 0);
   }
   if (d.bookmark !== undefined) {
     const i = Number(d.bookmark),
@@ -938,7 +1186,7 @@ document.addEventListener("click", async (e) => {
         (n) => n.book === book.id && n.chapter === ch && n.sentence === i,
       );
     if (p >= 0) state.bookmarks.splice(p, 1);
-    else state.bookmarks.push({ book: book.id, chapter: ch, sentence: i });
+    else state.bookmarks.push({ book: book.id, chapter: ch, sentence: i, offset: visibleFragment(i)?.start || 0 });
     save();
     closeSheet();
     refreshText();
@@ -952,7 +1200,7 @@ document.addEventListener("click", async (e) => {
       (n) => !(n.book === book.id && n.chapter === ch && n.sentence === i),
     );
     if (text)
-      state.notes.push({ book: book.id, chapter: ch, sentence: i, text });
+      state.notes.push({ book: book.id, chapter: ch, sentence: i, offset: visibleFragment(i)?.start || 0, text });
     save();
     closeSheet();
     toast("笔记已保存");
@@ -964,9 +1212,9 @@ document.addEventListener("click", async (e) => {
     return openBook(book.id, { chapter: Number(d.jumpChapter), sentence: 0 });
   }
   if (d.jumpMark) {
-    const [chapter, sentence] = d.jumpMark.split(":").map(Number);
+    const [chapter, sentence, offset = 0] = d.jumpMark.split(":").map(Number);
     closeSheet();
-    return openBook(book.id, { chapter, sentence });
+    return openBook(book.id, { chapter, sentence, offset });
   }
   if (d.theme) {
     state.settings.theme = d.theme;
@@ -1018,7 +1266,7 @@ document.addEventListener("click", async (e) => {
   }
   if (d.returnSource) {
     const t = state.terms.find((t) => t.w === d.returnSource);
-    return openBook(t.book, { chapter: t.chapter, sentence: t.sentence });
+    return openBook(t.book, { chapter: t.chapter, sentence: t.sentence, offset: t.offset || 0 });
   }
   if (d.reviewAnswer) return checkReview(d.reviewAnswer);
   if (d.reviewGrade) {
@@ -1106,6 +1354,38 @@ document.addEventListener("click", async (e) => {
     return;
   }
   switch (action) {
+    case "popover-close":
+      readerPopover.close();
+      break;
+    case "popover-save":
+      savePopoverWord();
+      break;
+    case "word-more":
+      if (selectedLookup?.kind === "word") termSheet(selectedLookup.term, selectedLookup.index);
+      break;
+    case "popover-enable-translate":
+      if (!$("#popover-online-consent")?.checked) return toast("请先勾选允许发送点选的文字");
+      state.settings.online = true;
+      save();
+      translatePopover();
+      break;
+    case "popover-retry-translate":
+      translatePopover();
+      break;
+    case "reading-practice":
+      startReadingPractice();
+      break;
+    case "listen-mode": {
+      readerPopover.close(false);
+      lookupResume = null;
+      speaker.stop();
+      listening = !listening;
+      buildParts();
+      part = findReadingPage(parts, activeSentence, activeOffset);
+      renderReader();
+      if (listening) playFrom(activeSentence, activeOffset);
+      break;
+    }
     case "expand-context": {
       const expanded = node
         .closest(".context-box")
@@ -1143,6 +1423,9 @@ document.addEventListener("click", async (e) => {
       closeSheet();
       if (book) {
         speaker.stop();
+        lookupResume = null;
+        buildParts();
+        part = findReadingPage(parts, activeSentence, activeOffset);
         renderReader();
       }
       break;
@@ -1153,6 +1436,8 @@ document.addEventListener("click", async (e) => {
       turnPage(1);
       break;
     case "phrase-mode":
+      speaker.stop();
+      lookupResume = null;
       phraseMode = !phraseMode;
       phraseStart = null;
       refreshText();
@@ -1167,18 +1452,16 @@ document.addEventListener("click", async (e) => {
       break;
     case "play":
       if (["playing", "paused"].includes(speaker.mode)) speaker.toggle();
-      else playFrom(activeSentence);
+      else playFrom(activeSentence, activeOffset);
       break;
     case "stop-audio":
       speaker.stop();
       break;
     case "audio-prev":
-      playFrom(Math.max(0, activeSentence - 1));
+      stepSpeech(-1);
       break;
     case "audio-next":
-      playFrom(
-        Math.min(book.chapters[ch].lines.length - 1, activeSentence + 1),
-      );
+      stepSpeech(1);
       break;
     case "sleep":
       sheet(
@@ -1315,6 +1598,10 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("input", (e) => {
   const t = e.target;
+  if (t.id === "reader-seek") {
+    const label = $(".reader-page-label");
+    if (label) label.textContent = `第 ${ch + 1} 章 · ${Number(t.value) + 1}/${parts.length}`;
+  }
   if (t.id === "library-search") {
     search = t.value;
     const pos = t.selectionStart;
@@ -1345,6 +1632,17 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", async (e) => {
   const t = e.target;
+  if (t.id === "reader-seek" && book) {
+    readerPopover.close(false);
+    lookupResume = null;
+    speaker.stop();
+    speechUnits = [];
+    part = Math.min(parts.length - 1, Math.max(0, Number(t.value) || 0));
+    const fragment = parts[part].fragments[0];
+    savePosition(fragment.index, fragment.start);
+    renderReader();
+    return;
+  }
   if (t.id === "library-level") {
     level = t.value;
     library();
@@ -1406,7 +1704,71 @@ document.addEventListener("change", async (e) => {
     }
   }
 });
+let suppressReaderClickUntil = 0;
+let readerGesture = null;
+document.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "touch" || !book || modal.open || readerPopover.element.open || !event.target.closest(".reader-paper") || event.target.closest("button,input,textarea,a") || event.button !== 0) return;
+  readerGesture = { id: event.pointerId, x: event.clientX, y: event.clientY, at: Date.now() };
+}, { passive: true });
+document.addEventListener("pointercancel", () => {
+  if (readerGesture?.id !== "touch") readerGesture = null;
+}, { passive: true });
+document.addEventListener("pointerup", (event) => {
+  if (!readerGesture || event.pointerId !== readerGesture.id) return;
+  finishReaderGesture(event.clientX, event.clientY);
+}, { passive: true });
+function finishReaderGesture(x, y) {
+  if (!readerGesture) return;
+  const gesture = readerGesture;
+  readerGesture = null;
+  const dx = x - gesture.x;
+  const dy = y - gesture.y;
+  if (Math.abs(dx) < 65 || Math.abs(dx) < Math.abs(dy) * 1.5 || Date.now() - gesture.at > 2500) return;
+  suppressReaderClickUntil = Date.now() + 600;
+  turnPage(dx < 0 ? 1 : -1);
+}
+document.addEventListener("touchstart", (event) => {
+  if (!book || modal.open || readerPopover.element.open || event.touches.length !== 1 || !event.target.closest(".reader-paper") || event.target.closest("button,input,textarea,a")) return;
+  const touch = event.touches[0];
+  readerGesture = { id: "touch", x: touch.clientX, y: touch.clientY, at: Date.now() };
+}, { passive: true });
+document.addEventListener("touchend", (event) => {
+  if (readerGesture?.id !== "touch" || !event.changedTouches.length) return;
+  const touch = event.changedTouches[0];
+  finishReaderGesture(touch.clientX, touch.clientY);
+}, { passive: true });
+document.addEventListener("touchmove", (event) => {
+  if (readerGesture?.id !== "touch" || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const dx = touch.clientX - readerGesture.x;
+  const dy = touch.clientY - readerGesture.y;
+  if (event.cancelable && Math.abs(dx) > 25 && Math.abs(dx) > Math.abs(dy) * 1.5) event.preventDefault();
+}, { passive: false });
+document.addEventListener("touchcancel", () => { readerGesture = null; }, { passive: true });
+let reflowTimer;
+let readerViewport = { width: window.innerWidth, height: window.innerHeight };
+window.addEventListener("resize", () => {
+  if (Math.abs(window.innerWidth - readerViewport.width) < 2 && Math.abs(window.innerHeight - readerViewport.height) < 100) return;
+  clearTimeout(reflowTimer);
+  reflowTimer = setTimeout(() => {
+    readerViewport = { width: window.innerWidth, height: window.innerHeight };
+    if (!book || !route.startsWith("read/")) return;
+    if (modal.open) {
+      pendingReaderReflow = true;
+      return;
+    }
+    const wasPlaying = speaker.mode === "playing";
+    readerPopover.close(false);
+    lookupResume = null;
+    speaker.stop();
+    buildParts();
+    part = findReadingPage(parts, activeSentence, activeOffset);
+    renderReader();
+    if (wasPlaying) playFrom(activeSentence, activeOffset);
+  }, 160);
+});
 window.addEventListener("hashchange", () => {
+  readerPopover.close(false);
   closeSheet();
   render();
 });
@@ -1432,13 +1794,13 @@ let scrollTimer;
 document.addEventListener(
   "scroll",
   () => {
-    if (!book || !route.startsWith("read/") || speaker.mode === "playing")
+    if (!book || !route.startsWith("read/") || speaker.mode === "playing" || modal.open || readerPopover.element.open || Date.now() < ignoreReaderScrollUntil)
       return;
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(() => {
       const nodes = [...document.querySelectorAll(".reading-sentence")];
       const found = nodes.find((n) => n.getBoundingClientRect().bottom > 120);
-      if (found) savePosition(Number(found.dataset.sentence));
+      if (found && !modal.open && !readerPopover.element.open && Date.now() >= ignoreReaderScrollUntil) savePosition(Number(found.dataset.sentence), Number(found.dataset.offset) || 0);
     }, 250);
   },
   { passive: true },
