@@ -4399,3 +4399,17 @@ textarea {
     padding: 21px;
   }
 }
+
+.audio-extra { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:9px; }
+.audio-background-button { border:1px solid #bfcbbb; background:#f1f5ee; color:#304b3b; padding:8px 12px; border-radius:999px; font:inherit; font-size:12px; font-weight:700; white-space:nowrap; }
+.background-options { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:20px 0; }
+.background-options label { display:grid; gap:7px; font-size:13px; color:var(--muted,#647067); }
+.background-options select { width:100%; min-height:44px; padding:8px; border:1px solid #d7dfd1; border-radius:10px; background:var(--paper,#fff); color:inherit; font:inherit; }
+.background-status { margin:16px 0; padding:14px; border-radius:14px; background:rgba(113,137,100,.09); line-height:1.6; }
+.background-status p { margin:0; }
+.background-status progress { width:100%; margin-top:12px; accent-color:#658258; }
+.background-ready-actions .button, .background-sheet .button { margin-top:9px; }
+.background-delete { display:block; margin:12px auto 2px; border:0; background:none; color:#7d4d44; padding:8px; font:inherit; font-size:12px; }
+.background-sheet [hidden] { display:none !important; }
+.popover-actions { flex-wrap:wrap; }
+@media (max-width:380px) { .background-options { grid-template-columns:1fr; } .audio-extra { gap:6px; } .audio-extra small { font-size:10px; } }

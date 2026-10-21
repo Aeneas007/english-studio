@@ -73,7 +73,7 @@ test("lookup preview preserves the reading sentence until explicitly closed", (t
   synth.end(preview);
   assert.equal(synth.spoken.length, 2, "preview completion cannot resume reading");
   assert.equal(reader.resumeAfterLookup(handle), true);
-  assert.equal(synth.current.text, "Second sentence.");
+  assert.equal(synth.current.text, "sentence.");
   assert.equal(synth.current.rate, 0.8);
   assert.equal(synth.current.voice.name, "English voice");
   assert.equal(reader.resumeAfterLookup(handle), false, "a handle is single-use");
@@ -235,4 +235,161 @@ test("standalone pronunciation stops playback without advancing its old sentence
   synth.end(preview);
   assert.equal(reader.mode, "stopped");
   assert.equal(synth.spoken.length, 2);
+});
+
+
+test("play starts at a unit offset and boundary events retain the original coordinate space", (t) => {
+  const { reader, synth, updates } = setup(t);
+  reader.play(lines, 1, settings, undefined, 7);
+  const partial = synth.current;
+  assert.equal(partial.text, "sentence.");
+  assert.equal(updates.at(-1).offset, 7);
+  partial.onstart();
+  assert.equal(updates.at(-1).offset, 7);
+  assert.equal(updates.at(-1).word, -1);
+  partial.onboundary({ name: "word", charIndex: 2 });
+  assert.equal(updates.at(-1).word, 9);
+  synth.end(partial);
+  assert.equal(reader.index, 2);
+  assert.equal(reader.offset, 0);
+  assert.equal(synth.current.text, "Last sentence.");
+});
+
+test("two lookups resume remaining text without accumulating a boundary twice", (t) => {
+  const { reader, synth, updates } = setup(t);
+  const source = [["One two three four."], ["Next sentence."]];
+  reader.play(source, 0, settings, undefined, 4);
+  const first = synth.current;
+  assert.equal(first.text, "two three four.");
+  first.onboundary({ name: "word", charIndex: 4 });
+  assert.equal(reader.word, 8);
+  const firstHandle = reader.suspendForLookup(14);
+  assert.equal(reader.offset, 8, "a real boundary takes priority over a clicked fallback");
+  assert.equal(reader.word, -1);
+  reader.preview("three", settings);
+  synth.end();
+  reader.resumeAfterLookup(firstHandle);
+  const second = synth.current;
+  assert.equal(second.text, "three four.");
+  second.onboundary({ name: "word", charIndex: 6 });
+  assert.equal(updates.at(-1).word, 14);
+  const secondHandle = reader.suspendForLookup(0);
+  reader.preview("four", settings);
+  const preview = synth.current;
+  reader.resumeAfterLookup(secondHandle);
+  const third = synth.current;
+  assert.equal(third.text, "four.");
+  assert.equal(reader.offset, 14);
+  first.onboundary({ name: "word", charIndex: 0 });
+  first.onend();
+  second.onboundary({ name: "word", charIndex: 0 });
+  preview.onend();
+  assert.equal(synth.current, third);
+  third.onboundary({ name: "word", charIndex: 0 });
+  assert.equal(reader.word, 14, "the second slice origin is added only once");
+  synth.end(third);
+  assert.equal(synth.current.text, "Next sentence.");
+  assert.equal(reader.offset, 0);
+});
+
+test("manual pauses resume from the most recent real word boundary", (t) => {
+  const { reader, synth } = setup(t);
+  reader.play([["The quick brown fox."]], 0, settings);
+  synth.current.onboundary({ name: "word", charIndex: 10 });
+  reader.toggle();
+  assert.equal(reader.mode, "paused");
+  assert.equal(reader.offset, 10);
+  assert.equal(reader.word, -1);
+  reader.preview("brown", settings);
+  synth.end();
+  assert.equal(reader.mode, "paused");
+  assert.equal(reader.offset, 10, "preview never advances the reader checkpoint");
+  reader.toggle();
+  assert.equal(synth.current.text, "brown fox.");
+  synth.current.onboundary({ name: "word", charIndex: 6 });
+  reader.toggle();
+  reader.toggle();
+  assert.equal(synth.current.text, "fox.");
+  assert.equal(reader.offset, 16);
+});
+
+test("lookup can use a same-unit click when word boundaries are unavailable", (t) => {
+  const { reader, synth } = setup(t);
+  reader.play([["One two three four."]], 0, settings);
+  const handle = reader.suspendForLookup(8);
+  assert.equal(reader.offset, 8);
+  reader.preview("three", settings);
+  reader.preview("another pronunciation", settings);
+  synth.end();
+  assert.equal(reader.offset, 8);
+  reader.resumeAfterLookup(handle);
+  assert.equal(synth.current.text, "three four.");
+  const again = reader.suspendForLookup();
+  reader.resumeAfterLookup(again);
+  assert.equal(synth.current.text, "three four.", "no new boundary retains the known slice start");
+});
+
+test("invalid lookup offsets and malformed word events cannot move the checkpoint", (t) => {
+  const { reader, synth } = setup(t);
+  for (const fallback of [-1, Infinity, NaN, 200, "8"]) {
+    reader.play([["One two three four."]], 0, settings, undefined, 4);
+    const current = synth.current;
+    for (const charIndex of [-1, NaN, Infinity, 50, 1.5])
+      current.onboundary({ name: "word", charIndex });
+    current.onboundary({ name: "sentence", charIndex: 8 });
+    const handle = reader.suspendForLookup(fallback);
+    assert.equal(reader.offset, 4);
+    reader.resumeAfterLookup(handle);
+    assert.equal(synth.current.text, "two three four.");
+  }
+});
+
+test("an interrupted partial utterance preserves its absolute checkpoint", (t) => {
+  const { reader, synth } = setup(t);
+  reader.play([["One two three four."]], 0, settings, undefined, 4);
+  synth.current.onboundary({ name: "word", charIndex: 4 });
+  synth.current.onerror({ error: "interrupted" });
+  assert.equal(reader.mode, "paused");
+  assert.equal(reader.offset, 8);
+  reader.toggle();
+  assert.equal(synth.current.text, "three four.");
+});
+
+test("a completed offset advances to the next unit without an empty utterance", (t) => {
+  const { reader, synth } = setup(t);
+  reader.play(lines, 0, settings, undefined, lines[0][0].length);
+  assert.equal(reader.index, 1);
+  assert.equal(reader.offset, 0);
+  assert.equal(synth.spoken.length, 1);
+  assert.equal(synth.current.text, "Second sentence.");
+});
+
+test("English system default is preferred and an explicitly chosen voice controls its locale", (t) => {
+  const { reader, synth } = setup(t);
+  const us = { name: "American", lang: "en-US", default: false };
+  const au = { name: "Australian default", lang: "en-AU", default: true };
+  const gb = { name: "British", lang: "en-GB", default: false };
+  const fr = { name: "French default", lang: "fr-FR", default: true };
+  synth.getVoices = () => [fr, us, au, gb];
+  reader.play(lines, 0, { rate: 0.8, voice: "" });
+  assert.equal(synth.current.voice, au);
+  assert.equal(synth.current.lang, "en-AU");
+  reader.play(lines, 0, { rate: 0.8, voice: gb.name });
+  assert.equal(synth.current.voice, gb);
+  assert.equal(synth.current.lang, "en-GB");
+  reader.preview("word", { rate: 0.8, voice: gb.name });
+  assert.equal(synth.current.lang, "en-GB");
+});
+
+test("a voice list arriving after startup is used for the next utterance", (t) => {
+  const { reader, synth } = setup(t);
+  let voices = [];
+  synth.getVoices = () => voices;
+  reader.play(lines, 0, { rate: 0.8, voice: "British" });
+  assert.equal(synth.current.lang, "en-US");
+  assert.equal(synth.current.voice, undefined);
+  voices = [{ name: "British", lang: "en-GB", default: true }];
+  synth.end();
+  assert.equal(synth.current.voice, voices[0]);
+  assert.equal(synth.current.lang, "en-GB");
 });

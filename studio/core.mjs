@@ -296,6 +296,7 @@ export function defaults() {
       theme: "paper",
       rate: 0.85,
       voice: "",
+      offlineVoice: "af_heart",
       translations: false,
       online: false,
       autoNext: false,
@@ -437,6 +438,7 @@ export function mergeBackup(current, backup) {
   if (["paper", "white", "dark"].includes(settings.theme))
     next.settings.theme = settings.theme;
   if (typeof settings.voice === "string") next.settings.voice = settings.voice;
+  if (["af_heart", "bf_emma"].includes(settings.offlineVoice)) next.settings.offlineVoice = settings.offlineVoice;
   for (const key of ["translations", "autoNext", "known"]) {
     const value =
       legacy && key === "translations" ? settings.translation : settings[key];

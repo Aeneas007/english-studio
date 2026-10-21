@@ -1,0 +1,32 @@
+Offline English Voice runtime
+
+Runtime package versions:
+- kokoro-js 1.2.1 (Apache-2.0), https://github.com/hexgrad/kokoro/tree/664c76a704021239ba59c84dcbaa4d3dece01fe9/kokoro.js
+- @huggingface/transformers 3.5.1 (Apache-2.0), https://github.com/huggingface/transformers.js
+- phonemizer 1.2.1 (declared Apache-2.0), https://github.com/xenova/phonemizer.js/tree/6835144b7ee9043129222549c1ed2f6a27216278
+- ONNX Runtime Web 1.22.0-dev.20250409-89f8206ba4 (MIT), https://github.com/microsoft/onnxruntime
+Licenses and ONNX third-party notices are included alongside this file.
+
+The phonemizer includes compiled eSpeak NG code/data. eSpeak NG is a
+GPL-3.0-or-later project: https://github.com/espeak-ng/espeak-ng
+Its license is included as LICENSE-espeak-ng.txt. Upstream source and
+compilation wrapper used by phonemizer are available at the pinned source
+link above (src/espeakng.worker.js and data/). No voice recording or
+third-party application content is bundled.
+
+Local modifications:
+- runtime-source.mjs supplies an explicit cached voice adapter and checks
+  the token limit instead of silently truncating long sentences.
+- The build rewrites the otherwise unused upstream voice loader URL to
+  the pinned model revision. Actual model loading uses the prepared Cache
+  API with local_files_only=true; generated text is not sent to a server.
+- ONNX runs single-threaded WASM in a Worker, avoiding a cross-origin
+  isolation requirement. All runtime dependencies are served locally.
+
+Model (downloaded on request, not distributed in this repository):
+onnx-community/Kokoro-82M-v1.0-ONNX, Apache-2.0
+Revision: 1939ad2a8e416c0acfeecc08a694d14ef25f2231
+q8 file: onnx/model_quantized.onnx, 92361116 bytes
+SHA256: fbae9257e1e05ffc727e951ef9b9c98418e6d79f1c9b6b13bd59f5c9028a1478
+Model card: https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
+Selected voices af_heart / bf_emma: 522240 bytes each, same pinned revision.

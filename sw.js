@@ -1,13 +1,19 @@
-const SHELL = "english-studio-shell-v4.3.0",
+const SHELL = "english-studio-shell-v4.4.0",
   DATA = "english-studio-data";
 const FILES = [
   "./",
   "./index.html",
-  "./studio/ui.css?v=4.3.0",
-  "./studio/app.mjs?v=4.3.0",
+  "./studio/ui.css?v=4.4.0",
+  "./studio/app.mjs?v=4.4.0",
   "./studio/core.mjs",
   "./studio/lexicon.mjs",
   "./studio/speech.mjs",
+  "./studio/speech-units.mjs",
+  "./studio/reader-playback.mjs",
+  "./studio/chapter-audio.mjs",
+  "./studio/audio-cache.mjs",
+  "./studio/offline-voice.mjs",
+  "./studio/offline-voice-worker.mjs",
   "./studio/imports.mjs",
   "./studio/courses.mjs",
   "./studio/reader-popover.mjs",
@@ -45,7 +51,7 @@ self.addEventListener("activate", (event) =>
           keys
             .filter(
               (k) =>
-                k.startsWith("english-studio-") && ![SHELL, DATA].includes(k),
+                k.startsWith("english-studio-shell-") && k !== SHELL,
             )
             .map((k) => caches.delete(k)),
         ),

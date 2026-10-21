@@ -10,7 +10,11 @@ import {
   wordRoot,
 } from "./core.mjs";
 import { lookup, dictionaryInfo, translate } from "./lexicon.mjs";
-import { ReaderSpeech } from "./speech.mjs";
+import { ReaderPlayback } from "./reader-playback.mjs";
+import { buildSpeechUnits, speechUnitAt as sourceSpeechUnitAt } from "./speech-units.mjs";
+import { OfflineVoice } from "./offline-voice.mjs";
+import { audioTrackKey, readAudioTrack, saveAudioTrack, deleteAudioTrack } from "./audio-cache.mjs";
+import { validAudioTrack } from "./chapter-audio.mjs";
 import { parseFile, makeBook } from "./imports.mjs";
 import { lessons } from "./courses.mjs";
 import { ReaderPopover } from "./reader-popover.mjs";
@@ -60,15 +64,22 @@ let state = load(),
   step = 0,
   answerLocked = false,
   translationAbort = null,
-  sleepUntil = 0;
+  sleepUntil = 0,
+  activeAudioTrack = null,
+  backgroundRequest = 0,
+  backgroundJob = null,
+  backgroundReady = null,
+  backgroundResumeTrack = null,
+  backgroundPlan = null,
+  lastAudioSaved = 0;
 const readerPopover = new ReaderPopover(() => {
   popoverAbort?.abort();
   popoverAbort = null;
   document.querySelectorAll(".selected-word").forEach((node) => node.classList.remove("selected-word"));
   resumeReading();
 });
-function holdReading() {
-  if (!lookupResume) lookupResume = speaker.suspendForLookup();
+function holdReading(fallbackOffset) {
+  if (!lookupResume) lookupResume = speaker.suspendForLookup(fallbackOffset);
 }
 function resumeReading() {
   queueMicrotask(() => {
@@ -129,8 +140,10 @@ function day() {
   );
 }
 function nav(target) {
+  cancelBackgroundPreparation();
   openBookToken++;
-  speaker.stop();
+  activeAudioTrack = null;
+  speaker.reset();
   lookupResume = null;
   readerPopover.close(false);
   closeSheet();
@@ -145,6 +158,7 @@ function download(name, data, type = "application/json") {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 function closeSheet() {
+  if (modal.classList.contains("background-sheet")) cancelBackgroundPreparation();
   sheetToken++;
   translationAbort?.abort();
   translationAbort = null;
@@ -274,9 +288,11 @@ function library() {
     .catch(() => {});
 }
 async function openBook(id, { chapter, sentence, offset } = {}) {
+  cancelBackgroundPreparation();
   const request = ++openBookToken;
   clearTimeout(scrollTimer);
-  speaker.stop();
+  activeAudioTrack = null;
+  speaker.reset();
   lookupResume = null;
   readerPopover.close(false);
   closeSheet();
@@ -401,7 +417,7 @@ function renderReader() {
   document.body.dataset.theme = state.settings.theme;
   const pending = readingPending();
   const heading = readerHeading();
-  root.innerHTML = `<div class="reader-shell ${listening ? "listening" : ""}"><header class="reading-top"><button class="round" data-action="back-books" aria-label="${book.track ? "返回工种课程" : book.course ? "返回本册课程" : "返回书架"}">‹</button><div class="reader-title"><strong>${esc(book.title)}</strong><small>${esc(heading.title)}</small></div><div class="reader-tools"><button class="round" data-action="listen-mode" aria-label="${listening ? "退出听读" : "开启听读"}" aria-pressed="${listening}">${listening ? "■" : "♫"}</button><button class="reading-study-button ${pending.length >= 5 ? "ready" : ""}" data-action="reading-practice" aria-label="本书 ${pending.length} 个待练习词"><span>◇</span><span class="reader-count">${pending.length}</span></button><button class="round" data-action="contents" aria-label="章节目录">☷</button><button class="round" data-action="reader-settings" aria-label="阅读设置">Aa</button></div></header><div class="reading-position"><input class="reader-seek" id="reader-seek" type="range" min="0" max="${parts.length - 1}" value="${part}" aria-label="本章阅读页码"><span class="reader-page-label">${esc(heading.label)} · ${part + 1}/${parts.length}</span></div><main class="reader-paper" style="--font:${state.settings.size}px;--leading:${state.settings.line}">${part === 0 ? `<div class="reader-chapter-head"><p class="eyebrow">${esc(heading.eyebrow)}</p><h1>${esc(heading.title)}</h1>${heading.context ? `<p class="reader-chapter-context">${esc(heading.context)}</p>` : ""}</div>` : ""}<div class="reader-mode-strip"><button data-action="phrase-mode" class="${phraseMode ? "selected" : ""}">${phraseMode ? "请依次点选短语首词、末词" : "选短语"}</button><button data-action="translation-toggle">${state.settings.translations ? "隐藏译文" : "双语阅读"}</button><button data-action="marks">书签 / 笔记</button>${textbookReaderTools()}</div><div id="reading-text">${sentenceHTML()}</div></main><footer class="reader-footer"><button data-action="prev-page" ${ch === 0 && part === 0 ? "disabled" : ""}>‹ 上一页</button><span>${part + 1} / ${parts.length}<small> · ${Math.min(100, record(book.id).percent || 0)}%</small></span><button data-action="next-page">${ch === book.chapters.length - 1 && part === parts.length - 1 ? "读完 ✓" : "下一页 ›"}</button></footer><section class="audio-dock" aria-label="听读控制"><div class="audio-progress"><span id="audio-caption">${esc(book.chapters[ch].title)}</span><button data-action="sleep">${sleepUntil ? "定时关闭中" : "睡眠定时"}</button></div><div class="audio-controls"><button class="round" data-action="audio-prev" aria-label="上一句">│‹</button><button class="play-button" id="reader-play" data-action="play" aria-label="${speaker.mode === "playing" ? "暂停朗读" : "开始朗读"}">${speaker.mode === "playing" ? "Ⅱ" : "▶"}</button><button class="round" data-action="audio-next" aria-label="下一句">›│</button><button class="audio-small" data-action="reader-settings">${state.settings.rate}×</button><button class="audio-small" data-action="stop-audio">停止</button></div><small>设备语音 · <span id="offline-label">${navigator.onLine ? "已联网" : "离线模式"}</span></small></section></div>`;
+  root.innerHTML = `<div class="reader-shell ${listening ? "listening" : ""}"><header class="reading-top"><button class="round" data-action="back-books" aria-label="${book.track ? "返回工种课程" : book.course ? "返回本册课程" : "返回书架"}">‹</button><div class="reader-title"><strong>${esc(book.title)}</strong><small>${esc(heading.title)}</small></div><div class="reader-tools"><button class="round" data-action="listen-mode" aria-label="${listening ? "退出听读" : "开启听读"}" aria-pressed="${listening}">${listening ? "■" : "♫"}</button><button class="reading-study-button ${pending.length >= 5 ? "ready" : ""}" data-action="reading-practice" aria-label="本书 ${pending.length} 个待练习词"><span>◇</span><span class="reader-count">${pending.length}</span></button><button class="round" data-action="contents" aria-label="章节目录">☷</button><button class="round" data-action="reader-settings" aria-label="阅读设置">Aa</button></div></header><div class="reading-position"><input class="reader-seek" id="reader-seek" type="range" min="0" max="${parts.length - 1}" value="${part}" aria-label="本章阅读页码"><span class="reader-page-label">${esc(heading.label)} · ${part + 1}/${parts.length}</span></div><main class="reader-paper" style="--font:${state.settings.size}px;--leading:${state.settings.line}">${part === 0 ? `<div class="reader-chapter-head"><p class="eyebrow">${esc(heading.eyebrow)}</p><h1>${esc(heading.title)}</h1>${heading.context ? `<p class="reader-chapter-context">${esc(heading.context)}</p>` : ""}</div>` : ""}<div class="reader-mode-strip"><button data-action="phrase-mode" class="${phraseMode ? "selected" : ""}">${phraseMode ? "请依次点选短语首词、末词" : "选短语"}</button><button data-action="translation-toggle">${state.settings.translations ? "隐藏译文" : "双语阅读"}</button><button data-action="marks">书签 / 笔记</button>${textbookReaderTools()}</div><div id="reading-text">${sentenceHTML()}</div></main><footer class="reader-footer"><button data-action="prev-page" ${ch === 0 && part === 0 ? "disabled" : ""}>‹ 上一页</button><span>${part + 1} / ${parts.length}<small> · ${Math.min(100, record(book.id).percent || 0)}%</small></span><button data-action="next-page">${ch === book.chapters.length - 1 && part === parts.length - 1 ? "读完 ✓" : "下一页 ›"}</button></footer><section class="audio-dock" aria-label="听读控制"><div class="audio-progress"><span id="audio-caption">${esc(book.chapters[ch].title)}</span><button data-action="sleep">${sleepUntil ? "定时关闭中" : "睡眠定时"}</button></div><div class="audio-controls"><button class="round" data-action="audio-prev" aria-label="上一句">│‹</button><button class="play-button" id="reader-play" data-action="play" aria-label="${speaker.mode === "playing" ? "暂停朗读" : "开始朗读"}">${speaker.mode === "playing" ? "Ⅱ" : "▶"}</button><button class="round" data-action="audio-next" aria-label="下一句">›│</button><button class="audio-small" data-action="reader-settings">${state.settings.rate}×</button><button class="audio-small" data-action="stop-audio">停止</button></div><div class="audio-extra"><small><span id="audio-engine-label">${speaker.engine === "audio" && activeAudioTrack ? "本机音频 · " + audioTime(speaker.time) : "设备语音"}</span> · <span id="offline-label">${navigator.onLine ? "已联网" : "离线模式"}</span></small><button class="audio-background-button" data-action="background-audio">${speaker.engine === "audio" && activeAudioTrack ? "听书设置" : "锁屏听书"}</button></div></section></div>`;
   document.documentElement.scrollTop = 0;
 }
 function textbookReaderTools() {
@@ -456,7 +472,8 @@ function turnPage(delta) {
   speechUnits = [];
   readerPopover.close(false);
   lookupResume = null;
-  speaker.stop();
+  activeAudioTrack = null;
+  speaker.reset();
   phraseStart = null;
   if (delta > 0) {
     if (part < parts.length - 1) part++;
@@ -485,7 +502,8 @@ function completeBook() {
     `<div class="completion-mark">✓</div><h3>${esc(book.title)}</h3><p class="subtle">${book.chapters.length} 章 · ${words(book).toLocaleString()} 个英文词<br>每一次读完，都是下一次开始。</p><button class="button primary wide" data-action="back-books">回到书架</button>`,
   );
 }
-const speaker = new ReaderSpeech(updateSpeech);
+const speaker = new ReaderPlayback(updateSpeech);
+const offlineVoice = new OfflineVoice();
 function updateSpeech(s) {
   const play = $("#reader-play");
   if (play) {
@@ -496,9 +514,28 @@ function updateSpeech(s) {
     );
   }
   if (!book || !route.startsWith("read/")) return;
-  const unit = speechUnits[s.index];
+  const units = s.engine === "audio" && activeAudioTrack?.bookId === book.id ? activeAudioTrack.units : speechUnits;
+  const unit = units[s.index];
   const sourceIndex = unit?.index ?? s.index;
-  const sourceOffset = (unit?.start || 0) + Math.max(0, s.word);
+  const sourceOffset = (unit?.start || 0) + Math.max(0, s.word >= 0 ? s.word : s.offset || 0);
+  if (s.engine === "audio" && activeAudioTrack?.bookId === book.id && unit) {
+    if (["playing", "paused"].includes(s.mode) && (s.mode !== "playing" || Date.now() - lastAudioSaved > 2000)) {
+      record(book.id).audioPosition = { key: activeAudioTrack.key, time: s.time, updated: Date.now() };
+      lastAudioSaved = Date.now();
+      save();
+    }
+    if (unit.chapter !== ch && s.mode === "playing") {
+      ch = unit.chapter;
+      buildParts();
+      history.replaceState(null, "", "#read/" + book.id + "/" + ch);
+      route = location.hash.slice(1);
+      renderReader();
+    }
+  }
+  const engineLabel = $("#audio-engine-label");
+  if (engineLabel) engineLabel.textContent = s.engine === "audio"
+    ? "本机音频 · " + audioTime(s.time) + " / " + audioTime(s.duration)
+    : "设备语音";
   const statusCaption = $("#audio-caption");
   if (statusCaption && s.mode !== "playing")
     statusCaption.textContent =
@@ -507,8 +544,9 @@ function updateSpeech(s) {
         : s.mode === "stopped"
           ? book.chapters[ch].title
           : "朗读暂时不可用";
+  if (s.error === "tap-to-play") toast("音频已准备好，请再点一次播放");
   if (s.mode === "error") {
-    toast("设备朗读失败，请在设置中选择英语声音");
+    toast(s.engine === "audio" ? "音频播放失败，请重新打开听书设置" : "设备朗读失败，请在设置中选择英语声音");
     return;
   }
   if (s.mode !== "playing") return;
@@ -538,7 +576,7 @@ function updateSpeech(s) {
       );
       t?.classList.add("speaking-word");
     }
-    if (activeSentence !== sourceIndex || activeOffset !== sourceOffset) {
+    if (activeSentence !== sourceIndex || activeOffset !== sourceOffset || record(book.id).chapter !== ch) {
       savePosition(sourceIndex, sourceOffset);
     }
     if (s.word < 0) {
@@ -547,26 +585,27 @@ function updateSpeech(s) {
   }
   const caption = $("#audio-caption");
   if (caption)
-    caption.textContent = `正在听读 · ${s.index + 1} / ${speechUnits.length}`;
+    caption.textContent = `正在听读 · ${s.index + 1} / ${units.length}`;
 }
 function collectSpeechUnits() {
-  const segmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter("en", { granularity: "sentence" }) : null;
-  return parts.flatMap((page) => page.fragments.flatMap((fragment) => {
-    if (!segmenter) return [fragment];
-    return [...segmenter.segment(fragment.text)].filter((item) => item.segment.trim()).map((item) => ({ index: fragment.index, start: fragment.start + item.index, end: fragment.start + item.index + item.segment.length, text: item.segment }));
-  }));
+  return buildSpeechUnits(book.chapters[ch].lines).map((unit) => ({ ...unit, chapter: ch }));
 }
 function speechUnitAt(i, offset) {
-  const index = speechUnits.findIndex((unit) => unit.index > i || (unit.index === i && offset < unit.end));
-  return index >= 0 ? index : Math.max(0, speechUnits.length - 1);
+  return sourceSpeechUnitAt(speechUnits, i, offset);
 }
 function stepSpeech(delta) {
+  if (speaker.engine === "audio" && activeAudioTrack?.bookId === book?.id) {
+    const next = Math.max(0, Math.min(activeAudioTrack.cues.length - 1, speaker.index + delta));
+    speaker.audio.seek(activeAudioTrack.cues[next].start);
+    return;
+  }
   if (!speechUnits.length) speechUnits = collectSpeechUnits();
   const index = speechUnitAt(activeSentence, activeOffset);
   const unit = speechUnits[Math.max(0, Math.min(speechUnits.length - 1, index + delta))];
   if (unit) playFrom(unit.index, unit.start);
 }
 function playFrom(i, offset = 0) {
+  activeAudioTrack = null;
   try {
     if (!listening) {
       listening = true;
@@ -576,6 +615,8 @@ function playFrom(i, offset = 0) {
     }
     speechUnits = collectSpeechUnits();
     const start = speechUnitAt(i, offset);
+    const first = speechUnits[start];
+    const startOffset = first?.index === i ? Math.max(0, Math.min(first.text.length - 1, offset - first.start)) : 0;
     speaker.play(speechUnits.map((unit) => [unit.text]), start, state.settings, () => {
       if (state.settings.autoNext && ch < book.chapters.length - 1) {
         ch++;
@@ -587,7 +628,7 @@ function playFrom(i, offset = 0) {
         renderReader();
         playFrom(0);
       } else toast("本章朗读完成");
-    });
+    }, startOffset);
   } catch (e) {
     toast(e.message);
   }
@@ -640,11 +681,15 @@ function clearReaderSelection() {
   document.querySelectorAll(".selected-word").forEach((node) => node.classList.remove("selected-word"));
 }
 async function wordPopover(term, index, anchor, offset = 0) {
-  holdReading();
+  const wasReading = ["playing", "paused"].includes(speaker.mode);
+  const playingUnit = speechUnits[speaker.index];
+  const fallbackOffset = speaker.engine === "device" && playingUnit?.index === index && offset >= playingUnit.start && offset < playingUnit.end
+    ? offset - playingUnit.start : undefined;
+  holdReading(fallbackOffset);
   popoverAbort?.abort();
   clearReaderSelection();
   anchor.classList.add("selected-word");
-  savePosition(index, offset);
+  if (!wasReading) savePosition(index, offset);
   const token = readerPopover.show(anchor, `<div class="popover-header"><strong class="popover-term">${esc(term)}</strong><button class="popover-close" data-action="popover-close" aria-label="关闭词卡">×</button></div><p class="popover-status">正在查词…</p>`, "word-popover", term + "的词义");
   const existing = state.terms.find((entry) => entry.w === normalize(term));
   let result;
@@ -655,7 +700,7 @@ async function wordPopover(term, index, anchor, offset = 0) {
   const rootForm = wordRoot(term);
   const rootEntry = rootForm !== normalize(term) ? [result, ...(result?.alternatives || [])].find((entry) => entry?.base === rootForm) : null;
   const pending = readingPending().some((entry) => entry.w === normalize(term));
-  readerPopover.element.innerHTML = `<div class="popover-header"><strong class="popover-term">${esc(term)}</strong><button class="popover-close" data-action="popover-close" aria-label="关闭词卡">×</button></div><p class="popover-phonetic">${result?.phonetic ? "/" + esc(result.phonetic) + "/" : ""}${rootEntry ? ` <span>原形 ${esc(rootForm)}</span>` : result?.base && result.base !== normalize(term) ? ` <span>原形 ${esc(result.base)}</span>` : ""}</p><p class="popover-meaning">${esc(shortMeaning(meaning, 85) || "本站词库暂未查到释义")}</p>${rootEntry && rootEntry.meaning !== meaning ? `<p class="popover-status">${esc(rootForm)} · ${esc(shortMeaning(rootEntry.meaning, 45))}</p>` : ""}<div class="popover-actions"><button class="button soft" data-pronounce="${esc(term)}" aria-label="朗读 ${esc(term)}">▶ 发音</button><button class="button primary" data-action="popover-save" ${!meaning || pending ? "disabled" : ""}>${pending ? "已加入本组 ✓" : existing ? "加入本组练习" : "＋ 加入本组"}</button></div><button class="popover-more" data-action="word-more">完整词义 · 编辑 · 原句 ›</button><small class="popover-status">${existing ? "已收藏在单词本" : "加入后会同时保存到单词本"}</small>`;
+  readerPopover.element.innerHTML = `<div class="popover-header"><strong class="popover-term">${esc(term)}</strong><button class="popover-close" data-action="popover-close" aria-label="关闭词卡">×</button></div><p class="popover-phonetic">${result?.phonetic ? "/" + esc(result.phonetic) + "/" : ""}${rootEntry ? ` <span>原形 ${esc(rootForm)}</span>` : result?.base && result.base !== normalize(term) ? ` <span>原形 ${esc(result.base)}</span>` : ""}</p><p class="popover-meaning">${esc(shortMeaning(meaning, 85) || "本站词库暂未查到释义")}</p>${rootEntry && rootEntry.meaning !== meaning ? `<p class="popover-status">${esc(rootForm)} · ${esc(shortMeaning(rootEntry.meaning, 45))}</p>` : ""}<div class="popover-actions"><button class="button soft" data-pronounce="${esc(term)}" aria-label="朗读 ${esc(term)}">▶ 发音</button><button class="button soft" data-start-sentence="${index}" data-offset="${offset}">从这个词听</button><button class="button primary" data-action="popover-save" ${!meaning || pending ? "disabled" : ""}>${pending ? "已加入本组 ✓" : existing ? "加入本组练习" : "＋ 加入本组"}</button></div><button class="popover-more" data-action="word-more">完整词义 · 编辑 · 原句 ›</button><small class="popover-status">${existing ? "已收藏在单词本" : "加入后会同时保存到单词本"}</small>`;
   readerPopover.position();
 }
 function savePopoverWord() {
@@ -828,6 +873,168 @@ function showTranslation(result, target) {
       inline.textContent = state.translations[l[0]];
   }
 }
+function audioTime(seconds = 0) {
+  const value = Math.max(0, Math.floor(Number(seconds) || 0));
+  return Math.floor(value / 60) + ":" + String(value % 60).padStart(2, "0");
+}
+function cancelBackgroundPreparation() {
+  backgroundRequest++;
+  backgroundJob?.abort();
+  backgroundJob = null;
+}
+function backgroundStatus(message, progress) {
+  const label = $("#background-status");
+  if (label) label.textContent = message;
+  const bar = $("#background-progress");
+  if (bar) { bar.hidden = progress === undefined; bar.value = progress ?? 0; }
+}
+function backgroundButtons(ready = false, busy = false) {
+  const prepare = $("[data-action='prepare-background']");
+  if (prepare) { prepare.disabled = busy || !backgroundPlan; prepare.hidden = ready; }
+  const play = $("#background-ready-actions");
+  if (play) play.hidden = !ready;
+  for (const id of ["background-voice", "background-scope"]) if ($("#" + id)) $("#" + id).disabled = busy;
+}
+function openBackgroundListening() {
+  if (!book) return;
+  backgroundReady = null;
+  backgroundPlan = null;
+  backgroundResumeTrack = null;
+  const voice = state.settings.offlineVoice === "bf_emma" ? "bf_emma" : "af_heart";
+  sheet("锁屏听书", `<p class="subtle">先在本机准备连续音频，再切换应用或锁屏听。文字留在本机，无需账号。</p><div class="background-options"><label>声音<select id="background-voice"><option value="af_heart" ${voice === "af_heart" ? "selected" : ""}>Heart · 美式女声</option><option value="bf_emma" ${voice === "bf_emma" ? "selected" : ""}>Emma · 英式女声</option></select></label><label>准备范围<select id="background-scope"><option value="1">当前章节</option>${ch + 1 < book.chapters.length ? '<option value="3">当前章节及后两章</option>' : ""}</select></label></div><div class="background-status" role="status"><p id="background-status">正在检查本机音频…</p><progress id="background-progress" max="1" value="0" hidden></progress></div><div id="background-resume-actions" hidden><button class="button soft wide" data-action="continue-background"></button></div><div class="background-ready-actions" id="background-ready-actions" hidden><button class="button primary wide" data-action="play-background">开始听 / 从上次听点继续</button><button class="button soft wide" data-action="play-background-here">从当前句开始听</button><button class="background-delete" data-action="delete-background">删除这份本机音频</button></div><button class="button primary wide" data-action="prepare-background" disabled>准备音频（首次下载语音包）</button><button class="button soft wide" data-action="cancel-background">返回阅读</button><p class="micro">首次准备约需下载 110MB 免费离线语音包，之后复用；生成时保持此页在前台。音频准备好后，按播放即可锁屏听已准备的内容。速度和耗电取决于手机。</p>`, "background-sheet");
+  refreshBackgroundPlan();
+}
+async function refreshBackgroundPlan() {
+  const request = ++backgroundRequest;
+  backgroundReady = null;
+  backgroundPlan = null;
+  backgroundResumeTrack = null;
+  if ($("#background-resume-actions")) $("#background-resume-actions").hidden = true;
+  backgroundButtons();
+  if (!book || !$("#background-scope")) return;
+  const firstChapter = ch;
+  const lastChapter = Math.min(book.chapters.length - 1, ch + Number($("#background-scope").value) - 1);
+  const voice = $("#background-voice").value;
+  const units = [];
+  for (let chapter = firstChapter; chapter <= lastChapter; chapter++)
+    units.push(...buildSpeechUnits(book.chapters[chapter].lines).map((unit) => ({ ...unit, chapter })));
+  if (!units.length) return backgroundStatus("这章没有可以朗读的正文。");
+  const characters = units.reduce((sum, unit) => sum + unit.text.length, 0);
+  const plan = { bookId: book.id, firstChapter, lastChapter, voice, units };
+  try {
+    plan.key = await audioTrackKey(book.id, firstChapter, lastChapter, voice, units);
+    const track = await readAudioTrack(plan.key).catch(() => null);
+    const savedKey = record(plan.bookId).audioPosition?.key;
+    const previous = savedKey && savedKey !== plan.key ? await readAudioTrack(savedKey).catch(() => null) : null;
+    if (request !== backgroundRequest || book?.id !== plan.bookId) return;
+    let previousMatches = false;
+    if (validAudioTrack(previous) && previous.bookId === plan.bookId && previous.voice === voice &&
+        Number.isInteger(previous.firstChapter) && previous.firstChapter >= 0 && previous.firstChapter <= firstChapter &&
+        Number.isInteger(previous.lastChapter) && previous.lastChapter >= firstChapter && previous.lastChapter < book.chapters.length) {
+      const previousUnits = [];
+      for (let chapter = previous.firstChapter; chapter <= previous.lastChapter; chapter++)
+        previousUnits.push(...buildSpeechUnits(book.chapters[chapter].lines).map((unit) => ({ ...unit, chapter })));
+      previousMatches = previous.units?.length === previousUnits.length && previous.cues.length === previousUnits.length &&
+        previous.key === await audioTrackKey(plan.bookId, previous.firstChapter, previous.lastChapter, voice, previousUnits);
+    }
+    if (request !== backgroundRequest || !modal.open || !$("#background-status")) return;
+    backgroundPlan = plan;
+    if (previousMatches) {
+      backgroundResumeTrack = previous;
+      $("#background-resume-actions").hidden = false;
+      $("[data-action='continue-background']").textContent = "继续上次听书 · 第 " + (previous.firstChapter + 1) + "–" + (previous.lastChapter + 1) + " 章";
+    }
+    if (validAudioTrack(track) && track.units?.length === units.length) {
+      backgroundReady = track;
+      backgroundStatus("已保存在本机 · " + audioTime(track.cues.at(-1).end) + " · " + (track.blob.size / 1048576).toFixed(1) + "MB。可以离线播放。");
+      backgroundButtons(true);
+    } else {
+      if (characters > 45000) {
+        backgroundPlan = null;
+        backgroundStatus("这段内容较长，请改选当前章节；仍过长时可导入分段后的正文，避免手机内存不足。");
+        backgroundButtons();
+        return;
+      }
+      backgroundStatus("尚未准备 · " + units.length + " 个语音片段。准备后保存在本机，再次打开无需重新生成。");
+      backgroundButtons();
+    }
+  } catch (error) {
+    if (request === backgroundRequest) backgroundStatus(error.message || "暂时无法检查音频，请重试。");
+  }
+}
+async function prepareBackgroundAudio() {
+  const plan = backgroundPlan;
+  if (!plan || backgroundJob || !book || plan.bookId !== book.id) return;
+  const controller = new AbortController();
+  backgroundJob = controller;
+  const request = ++backgroundRequest;
+  lookupResume = null;
+  speaker.stop();
+  backgroundButtons(false, true);
+  backgroundStatus("正在准备本机语音环境…", 0);
+  let screenLock;
+  try {
+    try { screenLock = await navigator.wakeLock?.request("screen"); } catch { /* Keep preparing when a screen wake lock is unavailable. */ }
+    if (controller.signal.aborted) return;
+    globalThis.navigator?.storage?.persist?.().catch(() => {});
+    const result = await offlineVoice.prepare(plan.units, { voice: plan.voice, signal: controller.signal,
+      onProgress: (event) => {
+        if (request === backgroundRequest)
+          backgroundStatus(event.message || (event.phase === "download" ? "正在下载离线语音包…" : "正在本机生成音频…"), event.progress);
+      } });
+    if (controller.signal.aborted || request !== backgroundRequest) return;
+    const track = { ...plan, ...result, created: Date.now() };
+    if (!validAudioTrack(track) || track.cues.length !== plan.units.length) throw Error("音频生成不完整，请重试。");
+    let saved = true;
+    try { await saveAudioTrack(track); } catch { saved = false; }
+    if (controller.signal.aborted || request !== backgroundRequest) return;
+    backgroundReady = track;
+    backgroundStatus((saved ? "已准备并保存在本机" : "已准备；本机空间不足，本次播放可用但未保存") + " · " + audioTime(track.cues.at(-1).end) + " · " + (track.blob.size / 1048576).toFixed(1) + "MB。点播放后即可锁屏。", 1);
+    backgroundButtons(true);
+  } catch (error) {
+    if (request !== backgroundRequest || controller.signal.aborted) return;
+    backgroundStatus(error.message || "准备失败，请检查网络或可用存储后重试。");
+    backgroundButtons();
+  } finally {
+    screenLock?.release().catch(() => {});
+    if (backgroundJob === controller) {
+      offlineVoice.dispose();
+      backgroundJob = null;
+    }
+  }
+}
+async function playBackgroundAudio(resume = true) {
+  const track = backgroundReady;
+  if (!track || !book || track.bookId !== book.id) return;
+  const saved = record(book.id).audioPosition;
+  const currentUnit = track.units.findIndex((unit) => unit.chapter > ch || (unit.chapter === ch && (unit.index > activeSentence || (unit.index === activeSentence && activeOffset < unit.end))));
+  const here = track.cues[Math.max(0, currentUnit)]?.start || 0;
+  const time = resume && saved?.key === track.key && Number.isFinite(saved.time) && saved.time >= 0 && saved.time < track.cues.at(-1).end - 0.25 ? saved.time : here;
+  lookupResume = null;
+  closeSheet();
+  activeAudioTrack = track;
+  listening = true;
+  const cueIndex = track.cues.findLastIndex((cue) => cue.start <= time);
+  const unit = track.units[Math.max(0, cueIndex)];
+  ch = unit.chapter;
+  history.replaceState(null, "", "#read/" + book.id + "/" + ch);
+  route = location.hash.slice(1);
+  activeSentence = unit.index;
+  activeOffset = unit.start;
+  buildParts();
+  part = findReadingPage(parts, activeSentence, activeOffset);
+  savePosition(activeSentence, activeOffset);
+  renderReader();
+  speaker.loadAudio(track, { rate: state.settings.rate, title: book.title,
+    chapter: book.chapters[track.firstChapter].title + (track.lastChapter > track.firstChapter ? " — " + book.chapters[track.lastChapter].title : ""), time,
+    onEnd: () => {
+      record(book.id).audioPosition = { key: track.key, time: track.cues.at(-1).end, completed: true, updated: Date.now() };
+      save();
+      toast("已准备的听读内容播放完成，可继续准备下一章");
+    } });
+  await speaker.playAudio();
+}
+
 function settings(reader = false) {
   const voices =
     "speechSynthesis" in window
@@ -1116,14 +1323,14 @@ function profile() {
       },
     ).join(
       "",
-    )}</div><section class="profile-panel"><h2>本地数据与备份</h2><p class="subtle">学习记录保存在这个浏览器中。清理浏览器数据或更换手机不会自动同步，请定期导出备份。</p><div class="button-row"><button class="button primary" data-action="export-backup">导出全部备份</button><label class="button soft file-button">恢复备份<input id="restore-v4" type="file" accept=".json"></label><button class="button soft" data-action="export-words">导出单词 CSV</button></div></section><section class="profile-panel"><h2>离线阅读</h2><p class="subtle">已打开的书和查过的词库分片会自动缓存。书籍详情中可提前下载正文与本书词汇。</p><button class="button soft" data-action="cache-info">检查离线缓存</button></section><section class="profile-panel"><h2>阅读与收藏</h2><p>${state.notes.length} 条笔记 · ${state.bookmarks.length} 个书签 · ${state.imports.length} 本本地书籍</p><button class="button soft" data-action="manage-imports">管理本地书籍</button></section><p class="page-footnote"><button data-action="sources">版本、内容来源与使用限制</button> · English Studio 4.3</p>`,
+    )}</div><section class="profile-panel"><h2>本地数据与备份</h2><p class="subtle">学习记录保存在这个浏览器中。清理浏览器数据或更换手机不会自动同步，请定期导出备份。</p><div class="button-row"><button class="button primary" data-action="export-backup">导出全部备份</button><label class="button soft file-button">恢复备份<input id="restore-v4" type="file" accept=".json"></label><button class="button soft" data-action="export-words">导出单词 CSV</button></div></section><section class="profile-panel"><h2>离线阅读</h2><p class="subtle">已打开的书和查过的词库分片会自动缓存。书籍详情中可提前下载正文与本书词汇。</p><button class="button soft" data-action="cache-info">检查离线缓存</button></section><section class="profile-panel"><h2>阅读与收藏</h2><p>${state.notes.length} 条笔记 · ${state.bookmarks.length} 个书签 · ${state.imports.length} 本本地书籍</p><button class="button soft" data-action="manage-imports">管理本地书籍</button></section><p class="page-footnote"><button data-action="sources">版本、内容来源与使用限制</button> · English Studio 4.4</p>`,
     "profile",
   );
 }
 function sources() {
   sheet(
-    "English Studio 4.3",
-    `<p>English Studio 专注于英文阅读、听力练习与词汇积累，学习记录保存在当前浏览器。</p><ul class="source-list"><li>英汉词典：<a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">ECDICT</a>，MIT 许可；<a href="lexicon/LICENSE.txt" target="_blank">许可原文</a>。</li><li>经典全文：Project Gutenberg 提供的公版文本，保留原始来源与许可。<a href="content/SOURCE.md" target="_blank" rel="noopener">12 本原著的完整书单与来源说明</a></li><li>KJV：<a href="bible/SOURCE.md" target="_blank">eBible.org 标准文本与来源说明</a>。</li><li>分级短篇、情境课程与澳洲职业英语：本站原创。<a href="docs/trade-english.md" target="_blank" rel="noopener">职业课程与术语参考</a>。</li><li>朗读：设备英语 TTS，不是真人有声书。部分设备不提供逐词边界，此时按句高亮。</li><li>在线翻译：可选 MyMemory 免费服务，可能限额、不可用或翻译有误，不上传整本读物。</li></ul><p>新概念四册含本站原创配套，原版教材可导入自己的文件。未来计划继续扩充阅读资源、音频支持与课程练习。</p><a class="button soft wide" href="https://github.com/Aeneas007/english-studio/blob/main/docs/roadmap.md" target="_blank" rel="noopener">项目现状与未来计划 ↗</a>`,
+    "English Studio 4.4",
+    `<p>English Studio 专注于英文阅读、听力练习与词汇积累，学习记录保存在当前浏览器。</p><ul class="source-list"><li>英汉词典：<a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">ECDICT</a>，MIT 许可；<a href="lexicon/LICENSE.txt" target="_blank">许可原文</a>。</li><li>经典全文：Project Gutenberg 提供的公版文本，保留原始来源与许可。<a href="content/SOURCE.md" target="_blank" rel="noopener">12 本原著的完整书单与来源说明</a></li><li>KJV：<a href="bible/SOURCE.md" target="_blank">eBible.org 标准文本与来源说明</a>。</li><li>分级短篇、情境课程与澳洲职业英语：本站原创。<a href="docs/trade-english.md" target="_blank" rel="noopener">职业课程与术语参考</a>。</li><li>朗读：普通听读使用设备英语 TTS；锁屏听书可在本机下载免费离线模型并准备连续音频。设备不提供逐词边界或播放本机音频时按句高亮。<a href="docs/listening.md" target="_blank">听书说明</a> · <a href="studio/vendor/offline-voice/NOTICE.txt" target="_blank">语音组件与许可</a>。</li><li>在线翻译：可选 MyMemory 免费服务，可能限额、不可用或翻译有误，不上传整本读物。</li></ul><p>新概念四册含本站原创配套，原版教材可导入自己的文件。未来计划继续扩充阅读资源、音频支持与课程练习。</p><a class="button soft wide" href="https://github.com/Aeneas007/english-studio/blob/main/docs/roadmap.md" target="_blank" rel="noopener">项目现状与未来计划 ↗</a>`,
   );
 }
 function render() {
@@ -1133,7 +1340,9 @@ function render() {
     openBookToken++;
     readerPopover.close(false);
     lookupResume = null;
-    speaker.stop();
+    cancelBackgroundPreparation();
+    activeAudioTrack = null;
+    speaker.reset();
     book = null;
     speechUnits = [];
     listening = false;
@@ -1509,7 +1718,8 @@ document.addEventListener("click", async (e) => {
     case "listen-mode": {
       readerPopover.close(false);
       lookupResume = null;
-      speaker.stop();
+      activeAudioTrack = null;
+      speaker.reset();
       listening = !listening;
       buildParts();
       part = findReadingPage(parts, activeSentence, activeOffset);
@@ -1552,8 +1762,10 @@ document.addEventListener("click", async (e) => {
     case "apply-settings":
       closeSheet();
       if (book) {
-        speaker.stop();
-        lookupResume = null;
+        if (speaker.engine !== "audio") {
+          speaker.stop();
+          lookupResume = null;
+        }
         buildParts();
         part = findReadingPage(parts, activeSentence, activeOffset);
         renderReader();
@@ -1581,8 +1793,38 @@ document.addEventListener("click", async (e) => {
       renderReader();
       break;
     case "play":
-      if (["playing", "paused"].includes(speaker.mode)) speaker.toggle();
+      if (speaker.engine === "audio" && speaker.audio.track) speaker.toggle();
+      else if (["playing", "paused"].includes(speaker.mode)) speaker.toggle();
       else playFrom(activeSentence, activeOffset);
+      break;
+    case "background-audio":
+      openBackgroundListening();
+      break;
+    case "prepare-background":
+      prepareBackgroundAudio();
+      break;
+    case "continue-background":
+      if (backgroundResumeTrack) {
+        backgroundReady = backgroundResumeTrack;
+        playBackgroundAudio(true);
+      }
+      break;
+    case "play-background":
+      playBackgroundAudio(true);
+      break;
+    case "play-background-here":
+      playBackgroundAudio(false);
+      break;
+    case "delete-background":
+      if (backgroundReady) {
+        await deleteAudioTrack(backgroundReady.key);
+        backgroundReady = null;
+        refreshBackgroundPlan();
+      }
+      break;
+    case "cancel-background":
+      cancelBackgroundPreparation();
+      closeSheet();
       break;
     case "stop-audio":
       speaker.stop();
@@ -1792,10 +2034,17 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", async (e) => {
   const t = e.target;
+  if (["background-voice", "background-scope"].includes(t.id)) {
+    if (t.id === "background-voice") { state.settings.offlineVoice = t.value; save(); }
+    refreshBackgroundPlan();
+    return;
+  }
+  if (t.id === "speech-rate") speaker.setRate(Number(t.value));
   if (t.id === "reader-seek" && book) {
     readerPopover.close(false);
     lookupResume = null;
-    speaker.stop();
+    activeAudioTrack = null;
+    speaker.reset();
     speechUnits = [];
     part = Math.min(parts.length - 1, Math.max(0, Number(t.value) || 0));
     const fragment = parts[part].fragments[0];
@@ -1915,6 +2164,12 @@ window.addEventListener("resize", () => {
     if (!book || !route.startsWith("read/")) return;
     if (modal.open) {
       pendingReaderReflow = true;
+      return;
+    }
+    if (speaker.engine === "audio") {
+      buildParts();
+      part = findReadingPage(parts, activeSentence, activeOffset);
+      renderReader();
       return;
     }
     const wasPlaying = speaker.mode === "playing";

@@ -1,2 +1,4 @@
 # Preserve downloaded source bytes for reproducible SHA-256 verification.
 content/sources/*.txt -text
+# Preserve the pinned runtime bytes and upstream formatting.
+studio/vendor/offline-voice/* -text -whitespace
